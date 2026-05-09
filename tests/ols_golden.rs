@@ -153,4 +153,7 @@ fn assert_dataset(name: &str) {
     }
 }
 
-#[test] fn longley() { assert_dataset("longley"); }
+#[test] fn longley()          { assert_dataset("longley"); }
+#[test] fn mtcars()          { assert_dataset("mtcars"); }
+#[test] fn synthetic()       { assert_dataset("synthetic"); }
+#[test] fn heteroskedastic() { assert_dataset("heteroskedastic"); }

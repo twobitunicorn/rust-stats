@@ -82,3 +82,27 @@ fn fit_rejects_non_finite_in_x() {
     let err = Ols::new(y.as_ref(), x.as_ref()).fit().unwrap_err();
     assert_eq!(err, OlsError::NonFinite);
 }
+
+#[test]
+fn rank_deficient_golden_dataset_errors() {
+    use serde::Deserialize;
+    use std::path::PathBuf;
+
+    #[derive(Deserialize)]
+    struct Rd { y: Vec<f64>, x: Vec<Vec<f64>> }
+
+    let path: PathBuf = ["tests", "golden", "rank_deficient.json"].iter().collect();
+    let bytes = std::fs::read(path).unwrap();
+    let rd: Rd = serde_json::from_slice(&bytes).unwrap();
+
+    let y = Col::from_fn(rd.y.len(), |i| rd.y[i]);
+    let n = rd.x.len();
+    let p = rd.x[0].len();
+    let x = Mat::from_fn(n, p, |i, j| rd.x[i][j]);
+
+    let err = Ols::new(y.as_ref(), x.as_ref()).fit().unwrap_err();
+    match err {
+        OlsError::RankDeficient { .. } => {}
+        other => panic!("expected RankDeficient, got {:?}", other),
+    }
+}

@@ -83,9 +83,58 @@ def longley():
     fit_and_dump("longley", y, x, x_pred, intercept=True)
 
 
+def mtcars():
+    df = smds.get_rdataset("mtcars", "datasets").data
+    y = df["mpg"].to_numpy()
+    x = df[["cyl", "hp", "wt"]].to_numpy().astype(float)
+    x_pred = x[:5]
+    fit_and_dump("mtcars", y, x, x_pred, intercept=True)
+
+
+def synthetic():
+    rng = np.random.default_rng(20260509)
+    n, p = 200, 4
+    x = rng.standard_normal((n, p))
+    beta = np.array([0.5, -1.2, 2.1, 0.3])
+    y = 1.0 + x @ beta + rng.standard_normal(n) * 0.5
+    x_pred = rng.standard_normal((10, p))
+    fit_and_dump("synthetic", y, x, x_pred, intercept=True)
+
+
+def heteroskedastic():
+    rng = np.random.default_rng(42)
+    n = 150
+    x = rng.uniform(0.5, 5.0, size=(n, 1))
+    eps = rng.standard_normal(n) * x[:, 0]   # variance ∝ x²
+    y = 2.0 + 3.0 * x[:, 0] + eps
+    x_pred = np.array([[1.0], [2.5], [4.0]])
+    fit_and_dump("heteroskedastic", y, x, x_pred, intercept=True)
+
+
+def rank_deficient_input():
+    """Only saves the input — there is no reference fit because statsmodels
+    will silently use a pseudoinverse and we want the rust side to error."""
+    rng = np.random.default_rng(7)
+    n = 25
+    x_base = rng.standard_normal((n, 2))
+    x = np.column_stack([x_base[:, 0], x_base[:, 1], x_base[:, 0]])  # col 2 == col 0
+    y = rng.standard_normal(n)
+    out = {
+        "y": list(map(float, y)),
+        "x": x.tolist(),
+    }
+    target = OUT_DIR / "rank_deficient.json"
+    with target.open("w") as f:
+        json.dump(out, f, indent=2)
+    print(f"wrote {target}")
+
+
 def main():
     longley()
-    # Task 16 will add: mtcars(), synthetic(), heteroskedastic()
+    mtcars()
+    synthetic()
+    heteroskedastic()
+    rank_deficient_input()
 
 
 if __name__ == "__main__":
