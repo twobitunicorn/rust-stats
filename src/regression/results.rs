@@ -178,6 +178,33 @@ impl OlsResults {
         })
     }
 
+    /// Compute SE/t/p for the requested covariance estimator.
+    pub fn inference(&self, cov: CovType) -> Inference {
+        use crate::distributions::{t_two_sided_pvalue};
+        let cov_mat = self.cov(cov);
+        let beta = self.coef.as_ref();
+        let df = self.df_resid() as f64;
+        let std_err = Col::from_fn(self.p, |i| (*cov_mat.get(i, i)).sqrt());
+        let t_values = Col::from_fn(self.p, |i| *beta.get(i) / *std_err.get(i));
+        let p_values = Col::from_fn(self.p, |i| t_two_sided_pvalue(*t_values.get(i), df));
+        Inference { std_err, t_values, p_values }
+    }
+
+    /// Confidence intervals for the requested covariance, returning Result.
+    /// `alpha` must be in `(0, 1)` exclusive.
+    pub fn conf_int_with(&self, cov: CovType, alpha: f64) -> Result<Mat<f64>, crate::error::OlsError> {
+        if !(alpha > 0.0 && alpha < 1.0) {
+            return Err(crate::error::OlsError::InvalidAlpha(alpha));
+        }
+        let inf = self.inference(cov);
+        let crit = crate::distributions::t_quantile(1.0 - alpha / 2.0, self.df_resid() as f64);
+        let beta = self.coef.as_ref();
+        Ok(Mat::from_fn(self.p, 2, |i, j| match j {
+            0 => *beta.get(i) - crit * *inf.std_err.get(i),
+            _ => *beta.get(i) + crit * *inf.std_err.get(i),
+        }))
+    }
+
     /// HC0 sandwich covariance: (X'X)⁻¹ · Σ(eᵢ² xᵢxᵢ') · (X'X)⁻¹.
     pub fn cov_hc0(&self) -> Mat<f64> { sandwich(self, &weights_hc0(self)) }
 
