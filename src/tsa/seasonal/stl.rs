@@ -21,6 +21,9 @@ use faer::{Col, ColRef};
 /// Returns a `Decomposition` whose three columns reconstruct `y` exactly
 /// (additive: `y = T + S + R`; multiplicative: `y = T * S * R`).
 /// LOESS-based — no NaN edges.
+///
+/// All tunable parameters live on `StlOpts` — use `StlOpts::new(period)`
+/// for Cleveland defaults and override fields with struct-update syntax.
 pub fn stl(y: ColRef<'_, f64>, opts: StlOpts) -> Result<Decomposition, StlError> {
     if opts.period < 2 {
         return Err(StlError::InvalidPeriod(opts.period));
@@ -35,6 +38,8 @@ pub fn stl(y: ColRef<'_, f64>, opts: StlOpts) -> Result<Decomposition, StlError>
     let n_l = if period % 2 == 0 { period + 1 } else { period };
 
     let n_t = match opts.trend_window {
+        // Cleveland 1990 §3.4: trend smoother span defaults to the smallest
+        // odd integer >= 1.5 * period / (1 - 1.5 / seasonal_window).
         None => next_odd_ceil(1.5 * period as f64 / (1.0 - 1.5 / n_s as f64)),
         Some(t) => {
             if t % 2 == 0 {
@@ -80,7 +85,7 @@ pub fn stl(y: ColRef<'_, f64>, opts: StlOpts) -> Result<Decomposition, StlError>
     let work: Vec<f64> = if multiplicative {
         raw.iter().map(|v| v.ln()).collect()
     } else {
-        raw.clone()
+        raw
     };
 
     let (trend, seasonal) = stl_inner_loop(&work, period, n_s, n_l, n_t, n_i);
