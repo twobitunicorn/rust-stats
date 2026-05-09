@@ -1,4 +1,5 @@
-use rust_stats::OlsError;
+use faer::{Col, Mat};
+use rust_stats::{Ols, OlsError};
 
 #[test]
 fn error_variants_display_correctly() {
@@ -28,4 +29,40 @@ fn error_variants_display_correctly() {
     for (err, expected) in cases {
         assert_eq!(format!("{}", err), expected);
     }
+}
+
+#[test]
+fn fit_rejects_mismatched_y_x_rows() {
+    let y: Col<f64> = Col::from_fn(5, |_| 0.0);
+    let x: Mat<f64> = Mat::from_fn(4, 2, |_, _| 1.0);
+    let err = Ols::new(y.as_ref(), x.as_ref()).fit().unwrap_err();
+    assert_eq!(err, OlsError::DimensionMismatch { y: 5, x: 4 });
+}
+
+#[test]
+fn fit_rejects_insufficient_observations() {
+    // n=2, intercept=true, so p=3 ⇒ n <= p
+    let y: Col<f64> = Col::from_fn(2, |_| 1.0);
+    let x: Mat<f64> = Mat::from_fn(2, 2, |_, _| 1.0);
+    let err = Ols::new(y.as_ref(), x.as_ref()).fit().unwrap_err();
+    assert_eq!(err, OlsError::InsufficientObservations { n: 2, p: 3 });
+}
+
+#[test]
+fn fit_rejects_non_finite_in_y() {
+    let y_data = vec![1.0_f64, 2.0, f64::NAN, 4.0, 5.0];
+    let y: Col<f64> = Col::from_fn(5, |i| y_data[i]);
+    let x: Mat<f64> = Mat::from_fn(5, 2, |i, j| (i + j) as f64);
+    let err = Ols::new(y.as_ref(), x.as_ref()).fit().unwrap_err();
+    assert_eq!(err, OlsError::NonFinite);
+}
+
+#[test]
+fn fit_rejects_non_finite_in_x() {
+    let y: Col<f64> = Col::from_fn(5, |i| i as f64);
+    let x: Mat<f64> = Mat::from_fn(5, 2, |i, j| {
+        if i == 2 && j == 1 { f64::INFINITY } else { 1.0 }
+    });
+    let err = Ols::new(y.as_ref(), x.as_ref()).fit().unwrap_err();
+    assert_eq!(err, OlsError::NonFinite);
 }

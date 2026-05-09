@@ -1,5 +1,6 @@
 //! Fitted-model results object.
 
+#[derive(Debug)]
 pub struct OlsResults;
 
 pub enum CovType {
