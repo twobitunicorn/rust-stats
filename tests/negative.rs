@@ -2,6 +2,22 @@ use faer::{Col, Mat};
 use rust_stats::{Ols, OlsError};
 
 #[test]
+fn fit_rejects_rank_deficient_x() {
+    let n = 10;
+    // Two identical columns ⇒ rank-deficient even with intercept.
+    let x: Mat<f64> = Mat::from_fn(n, 2, |i, _| i as f64);
+    let y: Col<f64> = Col::from_fn(n, |i| i as f64);
+    let err = Ols::new(y.as_ref(), x.as_ref()).fit().unwrap_err();
+    match err {
+        OlsError::RankDeficient { rank, p } => {
+            assert!(rank < p);
+            assert_eq!(p, 3);
+        }
+        other => panic!("expected RankDeficient, got {:?}", other),
+    }
+}
+
+#[test]
 fn error_variants_display_correctly() {
     let cases: Vec<(OlsError, &str)> = vec![
         (
