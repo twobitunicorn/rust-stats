@@ -10,7 +10,6 @@ use once_cell::sync::OnceCell;
 use crate::regression::robust::{sandwich, weights_hc0, weights_hc1, weights_hc2, weights_hc3};
 
 /// Owned result of fitting an OLS model. All accessors are read-only.
-#[derive(Debug)]
 pub struct OlsResults {
     // Eagerly computed by fit():
     pub(crate) coef: Col<f64>,
@@ -265,5 +264,36 @@ impl OlsResults {
     /// Return coefficient names if set; otherwise None.
     pub fn names(&self) -> Option<&[String]> {
         self.names.as_deref()
+    }
+
+    /// Whether the model was fit with an intercept column.
+    pub fn has_intercept(&self) -> bool { self.has_intercept }
+
+    /// Render a statsmodels-style monospace summary using classical (non-robust) SEs.
+    pub fn summary(&self) -> String {
+        crate::regression::summary::render(self, CovType::NonRobust)
+    }
+
+    /// Render a statsmodels-style monospace summary using the specified covariance estimator.
+    pub fn summary_with(&self, cov: CovType) -> String {
+        crate::regression::summary::render(self, cov)
+    }
+}
+
+impl std::fmt::Display for OlsResults {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.summary())
+    }
+}
+
+impl std::fmt::Debug for OlsResults {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OlsResults")
+            .field("n", &self.n)
+            .field("p", &self.p)
+            .field("rank", &self.rank)
+            .field("has_intercept", &self.has_intercept)
+            .field("names", &self.names)
+            .finish_non_exhaustive()
     }
 }
