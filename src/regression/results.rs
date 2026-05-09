@@ -51,4 +51,35 @@ impl OlsResults {
     pub fn df_model(&self) -> usize {
         if self.has_intercept { self.p - 1 } else { self.p }
     }
+
+    pub fn fitted_values(&self) -> ColRef<'_, f64> { self.fitted.as_ref() }
+    pub fn residuals(&self) -> ColRef<'_, f64> { self.residuals.as_ref() }
+    pub fn sigma(&self) -> f64 { self.sigma2.sqrt() }
+
+    pub fn r_squared(&self) -> f64 {
+        if self.tss == 0.0 { 1.0 } else { 1.0 - self.rss / self.tss }
+    }
+
+    pub fn adj_r_squared(&self) -> f64 {
+        let n = self.n as f64;
+        let dfr = self.df_resid() as f64;
+        if dfr == 0.0 || self.tss == 0.0 {
+            return self.r_squared();
+        }
+        1.0 - (1.0 - self.r_squared()) * (n - 1.0) / dfr
+    }
+
+    pub fn f_statistic(&self) -> f64 {
+        let dfm = self.df_model() as f64;
+        let dfr = self.df_resid() as f64;
+        ((self.tss - self.rss) / dfm) / (self.rss / dfr)
+    }
+
+    pub fn f_pvalue(&self) -> f64 {
+        crate::distributions::f_sf(
+            self.f_statistic(),
+            self.df_model() as f64,
+            self.df_resid() as f64,
+        )
+    }
 }
