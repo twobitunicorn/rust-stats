@@ -34,7 +34,7 @@ fn quadratic_signal_exact_recovery_degree_two() {
     let y = col_from((0..n).map(|i| (i as f64).powi(2)).collect());
     let out = loess(y.as_ref(), 0.5, 2).unwrap();
     for i in 0..n {
-        assert_relative_eq!(out[i], (i as f64).powi(2), epsilon = 1e-9, max_relative = 1e-9);
+        assert_relative_eq!(out[i], (i as f64).powi(2), epsilon = 1e-9);
     }
 }
 
@@ -42,6 +42,7 @@ fn quadratic_signal_exact_recovery_degree_two() {
 fn wider_span_smooths_more() {
     // Deterministic noisy linear series — wider span reduces residual variance.
     let n = 300;
+    // Noise amplitude ≈ ±1 from the LCG output divided by 2^31.
     let y: Vec<f64> = {
         let mut state: u64 = 1;
         (0..n)

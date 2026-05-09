@@ -27,9 +27,6 @@ pub fn loess(
     let vec: Vec<f64> = y.iter().copied().collect();
     let slice = vec.as_slice();
     let n = slice.len();
-    if n == 0 {
-        return Ok(Col::zeros(0));
-    }
     let degree_us = degree as usize;
     let window = ((span * n as f64).ceil() as usize)
         .max(degree_us + 2)
@@ -52,9 +49,6 @@ pub fn loess_at(
     let vec: Vec<f64> = y.iter().copied().collect();
     let slice = vec.as_slice();
     let n = slice.len();
-    if n == 0 {
-        return Err(LoessError::Empty);
-    }
     let degree_us = degree as usize;
     let window = ((span * n as f64).ceil() as usize)
         .max(degree_us + 2)
@@ -62,30 +56,13 @@ pub fn loess_at(
     Ok(local_poly_fit_at_xf64(slice, xq, window, degree_us))
 }
 
-fn validate_loess_args(
-    y: ColRef<'_, f64>,
-    span: f64,
-    degree: u8,
-) -> Result<(), LoessError> {
-    if !(span > 0.0 && span <= 1.0) {
-        return Err(LoessError::InvalidSpan(span));
-    }
-    if degree > 2 {
-        return Err(LoessError::InvalidDegree(degree));
-    }
-    if y.nrows() == 0 {
-        return Err(LoessError::Empty);
-    }
-    if y.iter().any(|v| !v.is_finite()) {
-        return Err(LoessError::NonFinite);
-    }
-    Ok(())
-}
+// Internal helpers below are `pub(crate)` so `tsa::seasonal::stl` (Task 4)
+// can reuse the LOESS primitives without re-exporting them publicly.
 
 /// Window of size `k` (clipped to `n`) centred around the integer floor of
 /// `xq`. `xq` may be outside `[0, n-1]`, in which case the window snaps to
 /// the nearest boundary slice.
-pub(crate) fn loess_window_f(n: usize, xq: f64, k: usize) -> (usize, usize) {
+pub(crate) fn loess_window(n: usize, xq: f64, k: usize) -> (usize, usize) {
     if k >= n {
         return (0, n);
     }
@@ -140,6 +117,26 @@ pub(crate) fn gauss_solve_n(
     Some(x)
 }
 
+fn validate_loess_args(
+    y: ColRef<'_, f64>,
+    span: f64,
+    degree: u8,
+) -> Result<(), LoessError> {
+    if !(span > 0.0 && span <= 1.0) {
+        return Err(LoessError::InvalidSpan(span));
+    }
+    if degree > 2 {
+        return Err(LoessError::InvalidDegree(degree));
+    }
+    if y.nrows() == 0 {
+        return Err(LoessError::Empty);
+    }
+    if y.iter().any(|v| !v.is_finite()) {
+        return Err(LoessError::NonFinite);
+    }
+    Ok(())
+}
+
 /// Local polynomial fit at (possibly fractional) position `xq`, using the
 /// `k` closest indices in `y` and tricube distance weights. Returns the
 /// fitted value at `xq` (the intercept of the centred fit). Falls back to
@@ -154,7 +151,7 @@ pub(crate) fn local_poly_fit_at_xf64(
     if n == 0 {
         return f64::NAN;
     }
-    let (lo, hi) = loess_window_f(n, xq, k);
+    let (lo, hi) = loess_window(n, xq, k);
 
     // Furthest distance from xq to any window point. Bumped by 1 so the
     // boundary point doesn't get exactly zero weight, which preserves
@@ -248,6 +245,7 @@ pub(crate) fn local_poly_fit_at_xf64(
     }
 }
 
+/// Integer-index convenience wrapper for `local_poly_fit_at_xf64`.
 pub(crate) fn local_poly_fit_at(y: &[f64], xq: usize, k: usize, degree: usize) -> f64 {
     local_poly_fit_at_xf64(y, xq as f64, k, degree)
 }
@@ -261,6 +259,8 @@ pub(crate) fn loess_compute(y: &[f64], window: usize, degree: usize) -> Vec<f64>
         return Vec::new();
     }
     let k = window.max(degree + 2).min(n);
+    // Below n=256, rayon's thread-spawn overhead dominates the per-point fit
+    // cost; serial iteration wins.
     if n >= 256 {
         (0..n)
             .into_par_iter()
