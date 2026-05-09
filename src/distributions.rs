@@ -3,7 +3,7 @@
 //! Centralizing these makes call sites readable and the implementation
 //! swappable.
 
-use statrs::distribution::{ContinuousCDF, FisherSnedecor, StudentsT};
+use statrs::distribution::{ContinuousCDF, FisherSnedecor, Normal, StudentsT};
 
 /// CDF of Student's t with `df` degrees of freedom at `x`.
 pub fn t_cdf(x: f64, df: f64) -> f64 {
@@ -27,6 +27,22 @@ pub fn t_quantile(p: f64, df: f64) -> f64 {
 pub fn t_two_sided_pvalue(t: f64, df: f64) -> f64 {
     let dist = StudentsT::new(0.0, 1.0, df).expect("df must be > 0");
     2.0 * dist.sf(t.abs())
+}
+
+/// Inverse CDF (quantile) of the standard normal distribution at `p`.
+pub fn z_quantile(p: f64) -> f64 {
+    Normal::new(0.0, 1.0)
+        .expect("valid normal params")
+        .inverse_cdf(p)
+}
+
+/// Two-sided p-value for a z-statistic using the standard normal distribution.
+///
+/// Statsmodels uses the normal distribution (not t) for robust covariance
+/// estimators (HC0–HC3).
+pub fn z_two_sided_pvalue(z: f64) -> f64 {
+    let dist = Normal::new(0.0, 1.0).expect("valid normal params");
+    2.0 * dist.sf(z.abs())
 }
 
 /// Survival function (1 - CDF) of F-distribution with (df1, df2) at `x`.

@@ -179,25 +179,45 @@ impl OlsResults {
     }
 
     /// Compute SE/t/p for the requested covariance estimator.
+    ///
+    /// Follows statsmodels convention: NonRobust uses t-distribution with
+    /// `df_resid`; HC0–HC3 use the standard normal (z) distribution.
     pub fn inference(&self, cov: CovType) -> Inference {
-        use crate::distributions::{t_two_sided_pvalue};
+        use crate::distributions::{t_two_sided_pvalue, z_two_sided_pvalue};
         let cov_mat = self.cov(cov);
         let beta = self.coef.as_ref();
         let df = self.df_resid() as f64;
         let std_err = Col::from_fn(self.p, |i| (*cov_mat.get(i, i)).sqrt());
         let t_values = Col::from_fn(self.p, |i| *beta.get(i) / *std_err.get(i));
-        let p_values = Col::from_fn(self.p, |i| t_two_sided_pvalue(*t_values.get(i), df));
+        let p_values = match cov {
+            CovType::NonRobust => {
+                Col::from_fn(self.p, |i| t_two_sided_pvalue(*t_values.get(i), df))
+            }
+            CovType::HC0 | CovType::HC1 | CovType::HC2 | CovType::HC3 => {
+                Col::from_fn(self.p, |i| z_two_sided_pvalue(*t_values.get(i)))
+            }
+        };
         Inference { std_err, t_values, p_values }
     }
 
     /// Confidence intervals for the requested covariance, returning Result.
     /// `alpha` must be in `(0, 1)` exclusive.
+    ///
+    /// Follows statsmodels convention: NonRobust uses t-distribution with
+    /// `df_resid`; HC0–HC3 use the standard normal (z) distribution.
     pub fn conf_int_with(&self, cov: CovType, alpha: f64) -> Result<Mat<f64>, crate::error::OlsError> {
         if !(alpha > 0.0 && alpha < 1.0) {
             return Err(crate::error::OlsError::InvalidAlpha(alpha));
         }
         let inf = self.inference(cov);
-        let crit = crate::distributions::t_quantile(1.0 - alpha / 2.0, self.df_resid() as f64);
+        let crit = match cov {
+            CovType::NonRobust => {
+                crate::distributions::t_quantile(1.0 - alpha / 2.0, self.df_resid() as f64)
+            }
+            CovType::HC0 | CovType::HC1 | CovType::HC2 | CovType::HC3 => {
+                crate::distributions::z_quantile(1.0 - alpha / 2.0)
+            }
+        };
         let beta = self.coef.as_ref();
         Ok(Mat::from_fn(self.p, 2, |i, j| match j {
             0 => *beta.get(i) - crit * *inf.std_err.get(i),

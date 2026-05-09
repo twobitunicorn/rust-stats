@@ -10,6 +10,6 @@ pub mod regression;
 pub mod smoothing;
 pub mod tsa;
 
-pub use distributions::{f_sf, t_cdf, t_quantile, t_two_sided_pvalue};
+pub use distributions::{f_sf, t_cdf, t_quantile, t_two_sided_pvalue, z_quantile, z_two_sided_pvalue};
 pub use error::{LoessError, OlsError, SeasonalDecomposeError, StlError};
 pub use regression::{CovType, Inference, Ols, OlsResults};
