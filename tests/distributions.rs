@@ -8,9 +8,11 @@ fn t_cdf_at_zero_is_half() {
 
 #[test]
 fn t_two_sided_pvalue_known_values() {
-    // df=10, |t|=2.228 corresponds to roughly p=0.05
-    let p = t_two_sided_pvalue(2.228, 10.0);
-    assert_relative_eq!(p, 0.05, epsilon = 1e-3);
+    // df=10, |t|=2.22814... is the exact 0.025 quantile; use its inverse for accuracy.
+    // scipy.stats.t.ppf(0.025, 10) = -2.2281388366041255
+    let t_exact = 2.228_138_836_604_125_5_f64;
+    let p = t_two_sided_pvalue(t_exact, 10.0);
+    assert_relative_eq!(p, 0.05, epsilon = 1e-5);
 }
 
 #[test]
