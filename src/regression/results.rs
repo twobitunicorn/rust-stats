@@ -6,6 +6,7 @@ use faer::linalg::triangular_solve::{
     solve_upper_triangular_in_place,
 };
 use once_cell::sync::OnceCell;
+use crate::regression::robust::{sandwich, weights_hc0, weights_hc1, weights_hc2, weights_hc3};
 
 /// Owned result of fitting an OLS model. All accessors are read-only.
 #[derive(Debug)]
@@ -177,17 +178,29 @@ impl OlsResults {
         })
     }
 
+    /// HC0 sandwich covariance: (X'X)⁻¹ · Σ(eᵢ² xᵢxᵢ') · (X'X)⁻¹.
+    pub fn cov_hc0(&self) -> Mat<f64> { sandwich(self, &weights_hc0(self)) }
+
+    /// HC1 sandwich covariance: HC0 scaled by n/(n-p).
+    pub fn cov_hc1(&self) -> Mat<f64> { sandwich(self, &weights_hc1(self)) }
+
+    /// HC2 sandwich covariance: eᵢ² divided by (1 − hᵢᵢ).
+    pub fn cov_hc2(&self) -> Mat<f64> { sandwich(self, &weights_hc2(self)) }
+
+    /// HC3 sandwich covariance: eᵢ² divided by (1 − hᵢᵢ)².
+    pub fn cov_hc3(&self) -> Mat<f64> { sandwich(self, &weights_hc3(self)) }
+
     /// Coefficient covariance matrix for the requested estimator.
-    ///
-    /// Robust HC0–HC3 variants are implemented in Task 10.
     pub fn cov(&self, cov_type: CovType) -> Mat<f64> {
         match cov_type {
             CovType::NonRobust => {
                 let unscaled = self.cov_unscaled_inner();
                 Mat::from_fn(self.p, self.p, |i, j| *unscaled.get(i, j) * self.sigma2)
             }
-            // HC0..HC3 implemented in Task 10.
-            _ => unimplemented!("robust covariance arrives in Task 10"),
+            CovType::HC0 => self.cov_hc0(),
+            CovType::HC1 => self.cov_hc1(),
+            CovType::HC2 => self.cov_hc2(),
+            CovType::HC3 => self.cov_hc3(),
         }
     }
 }

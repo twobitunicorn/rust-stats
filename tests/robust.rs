@@ -1,0 +1,57 @@
+use approx::assert_relative_eq;
+use faer::{Col, Mat};
+use rust_stats::{CovType, Ols};
+
+fn small_heteroskedastic() -> rust_stats::OlsResults {
+    // y = 1 + 2x + ε with Var(ε) ∝ x²
+    let n = 30;
+    let x: Mat<f64> = Mat::from_fn(n, 1, |i, _| (i as f64) * 0.1 + 0.5);
+    let y: Col<f64> = Col::from_fn(n, |i| {
+        let xi = *x.get(i, 0);
+        1.0 + 2.0 * xi + 0.05 * xi * ((i as f64).sin())
+    });
+    Ols::new(y.as_ref(), x.as_ref()).fit().unwrap()
+}
+
+#[test]
+fn hc1_equals_hc0_times_n_over_n_minus_p() {
+    let res = small_heteroskedastic();
+    let hc0 = res.cov_hc0();
+    let hc1 = res.cov_hc1();
+    let scale = res.n_obs() as f64 / res.df_resid() as f64;
+    for i in 0..res.coef().nrows() {
+        for j in 0..res.coef().nrows() {
+            assert_relative_eq!(*hc1.get(i, j), *hc0.get(i, j) * scale, epsilon = 1e-10);
+        }
+    }
+}
+
+#[test]
+fn hc_diagonals_are_positive() {
+    let res = small_heteroskedastic();
+    for cov in [
+        res.cov_hc0(), res.cov_hc1(), res.cov_hc2(), res.cov_hc3(),
+    ] {
+        for i in 0..res.coef().nrows() {
+            assert!(*cov.get(i, i) > 0.0);
+        }
+    }
+}
+
+#[test]
+fn cov_dispatches_to_robust_variants() {
+    let res = small_heteroskedastic();
+    for (variant, direct) in [
+        (CovType::HC0, res.cov_hc0()),
+        (CovType::HC1, res.cov_hc1()),
+        (CovType::HC2, res.cov_hc2()),
+        (CovType::HC3, res.cov_hc3()),
+    ] {
+        let via = res.cov(variant);
+        for i in 0..res.coef().nrows() {
+            for j in 0..res.coef().nrows() {
+                assert_relative_eq!(*via.get(i, j), *direct.get(i, j), epsilon = 1e-12);
+            }
+        }
+    }
+}
