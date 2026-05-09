@@ -2,6 +2,7 @@
 
 pub mod design;
 pub mod ols;
+pub mod predict;
 pub mod results;
 pub mod robust;
 

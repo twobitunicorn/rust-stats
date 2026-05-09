@@ -1,6 +1,7 @@
 //! Fitted-model results object.
 
-use faer::{Col, ColRef, Mat};
+use faer::{Col, ColRef, Mat, MatRef};
+use crate::regression::predict::{predict as predict_impl, predict_interval as predict_interval_impl};
 use faer::linalg::triangular_solve::{
     solve_lower_triangular_in_place,
     solve_upper_triangular_in_place,
@@ -229,5 +230,25 @@ impl OlsResults {
             CovType::HC2 => self.cov_hc2(),
             CovType::HC3 => self.cov_hc3(),
         }
+    }
+
+    /// Point prediction: ŷ_new = X̃_new · β̂.
+    ///
+    /// `x_new` must have the same number of columns as the original predictor matrix
+    /// (excluding the intercept column, if any). Returns a column vector of predictions.
+    pub fn predict(&self, x_new: MatRef<'_, f64>) -> Result<Col<f64>, crate::error::OlsError> {
+        predict_impl(self, x_new)
+    }
+
+    /// Prediction intervals: returns an `n_new × 3` matrix with columns `[fit, lower, upper]`.
+    ///
+    /// Uses `ŷ ± t_{1-α/2} · sqrt(σ̂²(1 + xᵀ(X̃'X̃)⁻¹x))`.
+    /// `alpha` must be in `(0, 1)` exclusive.
+    pub fn predict_interval(
+        &self,
+        x_new: MatRef<'_, f64>,
+        alpha: f64,
+    ) -> Result<Mat<f64>, crate::error::OlsError> {
+        predict_interval_impl(self, x_new, alpha)
     }
 }
