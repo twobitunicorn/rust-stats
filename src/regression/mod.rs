@@ -1,17 +1,7 @@
 //! Regression models. v1: OLS only.
 
-pub struct Ols<'a> {
-    _phantom: core::marker::PhantomData<&'a ()>,
-}
+pub mod ols;
+pub mod results;
 
-pub struct OlsResults;
-
-pub enum CovType {
-    NonRobust,
-    HC0,
-    HC1,
-    HC2,
-    HC3,
-}
-
-pub struct Inference;
+pub use ols::Ols;
+pub use results::{CovType, Inference, OlsResults};
