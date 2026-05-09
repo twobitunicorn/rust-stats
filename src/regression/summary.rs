@@ -52,18 +52,27 @@ pub(crate) fn render(res: &OlsResults, cov: CovType) -> String {
 
     for i in 0..beta.nrows() {
         let _ = writeln!(s,
-            "{:<10} {:>10.4} {:>10.4} {:>10.3} {:>10.3} {:>10.4} {:>10.4}",
+            "{:<10} {} {} {} {} {} {}",
             labels[i],
-            *beta.get(i),
-            *inf.std_err.get(i),
-            *inf.t_values.get(i),
-            *inf.p_values.get(i),
-            *ci.get(i, 0),
-            *ci.get(i, 1),
+            fmt_num(*beta.get(i)),
+            fmt_num(*inf.std_err.get(i)),
+            fmt_num(*inf.t_values.get(i)),
+            fmt_num(*inf.p_values.get(i)),
+            fmt_num(*ci.get(i, 0)),
+            fmt_num(*ci.get(i, 1)),
         );
     }
     let _ = writeln!(s, "{line_eq}");
     s
+}
+
+fn fmt_num(x: f64) -> String {
+    let a = x.abs();
+    if a == 0.0 || (1e-3..1e6).contains(&a) {
+        format!("{x:>10.4}")
+    } else {
+        format!("{x:>10.4e}")
+    }
 }
 
 fn cov_label(cov: CovType) -> &'static str {
