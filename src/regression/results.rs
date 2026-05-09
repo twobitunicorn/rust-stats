@@ -251,4 +251,19 @@ impl OlsResults {
     ) -> Result<Mat<f64>, crate::error::OlsError> {
         predict_interval_impl(self, x_new, alpha)
     }
+
+    /// Set human-readable names for each coefficient (length must equal `p`,
+    /// where the first name corresponds to the intercept when present).
+    /// Panics if `names.len() != p`.
+    pub fn with_names(mut self, names: Vec<String>) -> Self {
+        assert!(names.len() == self.p,
+            "names length {} != p {}", names.len(), self.p);
+        self.names = Some(names);
+        self
+    }
+
+    /// Return coefficient names if set; otherwise None.
+    pub fn names(&self) -> Option<&[String]> {
+        self.names.as_deref()
+    }
 }
