@@ -1,5 +1,6 @@
 //! Regression models. v1: OLS only.
 
+pub mod design;
 pub mod ols;
 pub mod results;
 
