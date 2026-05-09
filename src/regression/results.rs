@@ -1,6 +1,10 @@
 //! Fitted-model results object.
 
 use faer::{Col, ColRef, Mat};
+use faer::linalg::triangular_solve::{
+    solve_lower_triangular_in_place,
+    solve_upper_triangular_in_place,
+};
 use once_cell::sync::OnceCell;
 
 /// Owned result of fitting an OLS model. All accessors are read-only.
@@ -81,5 +85,109 @@ impl OlsResults {
             self.df_model() as f64,
             self.df_resid() as f64,
         )
+    }
+
+    /// Classical (X̃'X̃)⁻¹, computed lazily and cached.
+    ///
+    /// Returns the unscaled covariance — multiply by σ² to get classical Cov(β̂).
+    /// The QR factorization is of the permuted design X̃·P, so the directly-computed
+    /// (R'R)⁻¹ is in permuted coordinates. We apply the forward permutation to
+    /// recover (X̃'X̃)⁻¹: `out[perm[i], perm[j]] = a[i, j]`.
+    fn cov_unscaled_inner(&self) -> &Mat<f64> {
+        self.cov_unscaled.get_or_init(|| {
+            let p = self.p;
+            // Start with identity; apply two triangular solves to form (R'R)⁻¹.
+            // (1) Solve R' · A = I  ⟹  A = R'⁻¹
+            //     R is upper-triangular, so R' is lower-triangular.
+            //     Use solve_lower_triangular_in_place on R.transpose().
+            // (2) Solve R · A = A  ⟹  A = R⁻¹ · R'⁻¹ = (R'R)⁻¹
+            let mut a: Mat<f64> = Mat::identity(p, p);
+
+            // Step (1): solve R' a = I  (R.transpose() is lower-triangular)
+            solve_lower_triangular_in_place(
+                self.r_factor.as_ref().transpose(),
+                a.as_mut(),
+                faer::Par::Seq,
+            );
+
+            // Step (2): solve R a = a
+            solve_upper_triangular_in_place(
+                self.r_factor.as_ref(),
+                a.as_mut(),
+                faer::Par::Seq,
+            );
+
+            // a is now (R'R)⁻¹ in pivoted coordinates.
+            // Unpermute: out[perm[i], perm[j]] = a[i, j].
+            let mut out: Mat<f64> = Mat::zeros(p, p);
+            for i in 0..p {
+                for j in 0..p {
+                    *out.get_mut(self.perm[i], self.perm[j]) = *a.get(i, j);
+                }
+            }
+            out
+        })
+    }
+
+    fn classical_std_err_inner(&self) -> &Col<f64> {
+        self.std_err_classical.get_or_init(|| {
+            let cov = self.cov_unscaled_inner();
+            Col::from_fn(self.p, |i| (*cov.get(i, i) * self.sigma2).sqrt())
+        })
+    }
+
+    /// Standard errors from the classical (non-robust) covariance estimator.
+    pub fn std_err(&self) -> ColRef<'_, f64> {
+        self.classical_std_err_inner().as_ref()
+    }
+
+    /// t-statistics from the classical covariance: β̂ᵢ / SE(β̂ᵢ).
+    pub fn t_values(&self) -> Col<f64> {
+        let beta = self.coef.as_ref();
+        let se = self.classical_std_err_inner();
+        Col::from_fn(self.p, |i| *beta.get(i) / *se.get(i))
+    }
+
+    /// Two-sided p-values from the classical covariance using the t-distribution
+    /// with `df_resid` degrees of freedom.
+    pub fn p_values(&self) -> Col<f64> {
+        let t = self.t_values();
+        let df = self.df_resid() as f64;
+        Col::from_fn(self.p, |i| crate::distributions::t_two_sided_pvalue(*t.get(i), df))
+    }
+
+    /// Confidence intervals as a (p × 2) matrix with columns `[lower, upper]`,
+    /// using classical SE and t-distribution critical values.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `alpha` is not in the open interval (0, 1).
+    /// For a `Result`-returning version, use `conf_int_with` (Task 11).
+    pub fn conf_int(&self, alpha: f64) -> Mat<f64> {
+        assert!(
+            alpha > 0.0 && alpha < 1.0,
+            "alpha must be in (0, 1); use conf_int_with for a Result-returning version"
+        );
+        let crit = crate::distributions::t_quantile(1.0 - alpha / 2.0, self.df_resid() as f64);
+        let beta = self.coef.as_ref();
+        let se = self.classical_std_err_inner();
+        Mat::from_fn(self.p, 2, |i, j| match j {
+            0 => *beta.get(i) - crit * *se.get(i),
+            _ => *beta.get(i) + crit * *se.get(i),
+        })
+    }
+
+    /// Coefficient covariance matrix for the requested estimator.
+    ///
+    /// Robust HC0–HC3 variants are implemented in Task 10.
+    pub fn cov(&self, cov_type: CovType) -> Mat<f64> {
+        match cov_type {
+            CovType::NonRobust => {
+                let unscaled = self.cov_unscaled_inner();
+                Mat::from_fn(self.p, self.p, |i, j| *unscaled.get(i, j) * self.sigma2)
+            }
+            // HC0..HC3 implemented in Task 10.
+            _ => unimplemented!("robust covariance arrives in Task 10"),
+        }
     }
 }
