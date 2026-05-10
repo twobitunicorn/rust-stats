@@ -1,10 +1,15 @@
 //! Classical (moving-average) seasonal-trend decomposition.
 //!
 //! Trend: centered moving average of length `period`.
-//! Seasonal: per-phase mean of detrended values, centred so the seasonal
-//! pattern sums to zero (additive) or products to one (multiplicative).
+//! Seasonal (additive):       per-phase mean of `y - trend`, centred to sum
+//!                            to zero across one period.
+//! Seasonal (multiplicative): per-phase mean of `y / trend`, normalised so
+//!                            the pattern's arithmetic mean across one
+//!                            period is one.
 //! Residual: `y - trend - seasonal` (additive) or `y / (trend * seasonal)`
 //! (multiplicative).
+//!
+//! Matches `statsmodels.tsa.seasonal.seasonal_decompose` for both modes.
 //!
 //! The first/last `period/2` positions of `trend` and `residual` are NaN
 //! (the centred moving-average edge band).
@@ -47,19 +52,21 @@ pub fn seasonal_decompose(
         }
     }
 
-    // Work in log-space for multiplicative mode.
-    let work: Vec<f64> = if multiplicative {
-        raw.iter().map(|v| v.ln()).collect()
-    } else {
-        raw
-    };
+    let trend = centered_ma(&raw, period);
 
-    let trend = centered_ma(&work, period);
-
-    let detrended: Vec<f64> = work
+    // Detrend in the appropriate space.
+    let detrended: Vec<f64> = raw
         .iter()
         .zip(trend.iter())
-        .map(|(yi, ti)| if ti.is_nan() { f64::NAN } else { yi - ti })
+        .map(|(yi, ti)| {
+            if ti.is_nan() {
+                f64::NAN
+            } else if multiplicative {
+                yi / ti
+            } else {
+                yi - ti
+            }
+        })
         .collect();
 
     let mut phase_sums = vec![0.0f64; period];
@@ -74,13 +81,21 @@ pub fn seasonal_decompose(
         .map(|k| {
             if phase_counts[k] > 0 {
                 phase_sums[k] / phase_counts[k] as f64
+            } else if multiplicative {
+                1.0
             } else {
                 0.0
             }
         })
         .collect();
     let pattern_mean: f64 = phase_means.iter().sum::<f64>() / period as f64;
-    let centered_pattern: Vec<f64> = phase_means.iter().map(|m| m - pattern_mean).collect();
+    // Additive: subtract so the pattern sums to zero. Multiplicative:
+    // divide so the pattern's arithmetic mean is one.
+    let centered_pattern: Vec<f64> = if multiplicative {
+        phase_means.iter().map(|m| m / pattern_mean).collect()
+    } else {
+        phase_means.iter().map(|m| m - pattern_mean).collect()
+    };
 
     let seasonal: Vec<f64> = (0..n).map(|i| centered_pattern[i % period]).collect();
 
@@ -88,21 +103,13 @@ pub fn seasonal_decompose(
         .map(|i| {
             if trend[i].is_nan() {
                 f64::NAN
+            } else if multiplicative {
+                raw[i] / (trend[i] * seasonal[i])
             } else {
-                work[i] - trend[i] - seasonal[i]
+                raw[i] - trend[i] - seasonal[i]
             }
         })
         .collect();
-
-    let (trend, seasonal, residual) = if multiplicative {
-        (
-            trend.into_iter().map(|v| v.exp()).collect::<Vec<_>>(),
-            seasonal.into_iter().map(|v| v.exp()).collect::<Vec<_>>(),
-            residual.into_iter().map(|v| v.exp()).collect::<Vec<_>>(),
-        )
-    } else {
-        (trend, seasonal, residual)
-    };
 
     let _ = n;
     Ok(Decomposition {
