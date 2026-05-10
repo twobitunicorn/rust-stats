@@ -1,16 +1,14 @@
-use faer::{Col, Mat};
-use rust_stats::{CovType, Ols};
+use rust_stats::{CovType, Matrix, Ols};
 
 fn fit() -> rust_stats::OlsResults {
     let n = 16;
-    // Two genuinely independent predictors so design isn't rank-deficient with intercept.
-    let x: Mat<f64> = Mat::from_fn(n, 2, |i, j| {
+    let x = Matrix::from_fn(n, 2, |i, j| {
         if j == 0 { (i as f64) * 0.13 } else { ((i as f64) * 0.5).sin() }
     });
-    let y: Col<f64> = Col::from_fn(n, |i| {
-        1.0 + 0.5 * (*x.get(i, 0)) + 0.1 * ((i as f64).sin())
-    });
-    Ols::new(y.as_ref(), x.as_ref()).fit().unwrap()
+    let y: Vec<f64> = (0..n)
+        .map(|i| 1.0 + 0.5 * x[(i, 0)] + 0.1 * ((i as f64).sin()))
+        .collect();
+    Ols::new(&y, x.as_ref()).fit().unwrap()
         .with_names(vec!["const".to_string(), "x1".to_string(), "x2".to_string()])
 }
 

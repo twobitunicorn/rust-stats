@@ -1,15 +1,14 @@
-use faer::{Col, Mat};
-use rust_stats::Ols;
+use rust_stats::{Matrix, Ols};
 
 fn fit() -> rust_stats::OlsResults {
-    // Use a full-rank design so fit() succeeds.
-    // p = 3 (intercept + 2 predictors).
     let n = 10;
-    let x: Mat<f64> = Mat::from_fn(n, 2, |i, j| {
+    let x = Matrix::from_fn(n, 2, |i, j| {
         if j == 0 { i as f64 * 0.5 } else { (i as f64 * 0.3).sin() }
     });
-    let y: Col<f64> = Col::from_fn(n, |i| 1.0 + 2.0 * (*x.get(i, 0)) - (*x.get(i, 1)));
-    Ols::new(y.as_ref(), x.as_ref()).fit().unwrap()
+    let y: Vec<f64> = (0..n)
+        .map(|i| 1.0 + 2.0 * x[(i, 0)] - x[(i, 1)])
+        .collect();
+    Ols::new(&y, x.as_ref()).fit().unwrap()
 }
 
 #[test]

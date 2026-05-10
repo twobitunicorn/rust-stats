@@ -1,24 +1,21 @@
 //! Fitted-model results object.
 
-use faer::{Col, ColRef, Mat, MatRef};
 use crate::regression::predict::{predict as predict_impl, predict_interval as predict_interval_impl};
-use faer::linalg::triangular_solve::{
-    solve_lower_triangular_in_place,
-    solve_upper_triangular_in_place,
-};
-use once_cell::sync::OnceCell;
 use crate::regression::robust::{sandwich, weights_hc0, weights_hc1, weights_hc2, weights_hc3};
+use faer::linalg::triangular_solve;
+use faer::{Mat, MatRef, Par};
+use once_cell::sync::OnceCell;
 
 /// Owned result of fitting an OLS model. All accessors are read-only.
 pub struct OlsResults {
     // Eagerly computed by fit():
-    pub(crate) coef: Col<f64>,
-    pub(crate) fitted: Col<f64>,
-    pub(crate) residuals: Col<f64>,
+    pub(crate) coef: Vec<f64>,
+    pub(crate) fitted: Vec<f64>,
+    pub(crate) residuals: Vec<f64>,
     pub(crate) x_design: Mat<f64>,    // X̃: includes intercept column if has_intercept
     pub(crate) r_factor: Mat<f64>,    // R from pivoted QR (p×p, upper triangular)
     pub(crate) perm: Vec<usize>,      // column permutation
-    pub(crate) leverage: Col<f64>,    // h_ii (diag of hat matrix)
+    pub(crate) leverage: Vec<f64>,    // h_ii (diag of hat matrix)
     pub(crate) n: usize,
     pub(crate) p: usize,
     pub(crate) rank: usize,
@@ -28,9 +25,9 @@ pub struct OlsResults {
     pub(crate) has_intercept: bool,
     pub(crate) names: Option<Vec<String>>,
 
-    // Lazy caches (filled in later tasks):
+    // Lazy caches:
     pub(crate) cov_unscaled: OnceCell<Mat<f64>>,
-    pub(crate) std_err_classical: OnceCell<Col<f64>>,
+    pub(crate) std_err_classical: OnceCell<Vec<f64>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,23 +39,23 @@ pub enum CovType {
     HC3,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Inference {
-    pub std_err: Col<f64>,
-    pub t_values: Col<f64>,
-    pub p_values: Col<f64>,
+    pub std_err: Vec<f64>,
+    pub t_values: Vec<f64>,
+    pub p_values: Vec<f64>,
 }
 
 impl OlsResults {
-    pub fn coef(&self) -> ColRef<'_, f64> { self.coef.as_ref() }
+    pub fn coef(&self) -> &[f64] { &self.coef }
     pub fn n_obs(&self) -> usize { self.n }
     pub fn df_resid(&self) -> usize { self.n - self.p }
     pub fn df_model(&self) -> usize {
         if self.has_intercept { self.p - 1 } else { self.p }
     }
 
-    pub fn fitted_values(&self) -> ColRef<'_, f64> { self.fitted.as_ref() }
-    pub fn residuals(&self) -> ColRef<'_, f64> { self.residuals.as_ref() }
+    pub fn fitted_values(&self) -> &[f64] { &self.fitted }
+    pub fn residuals(&self) -> &[f64] { &self.residuals }
     pub fn sigma(&self) -> f64 { self.sigma2.sqrt() }
 
     pub fn r_squared(&self) -> f64 {
@@ -89,72 +86,64 @@ impl OlsResults {
     }
 
     /// Classical (X̃'X̃)⁻¹, computed lazily and cached.
-    ///
-    /// Returns the unscaled covariance — multiply by σ² to get classical Cov(β̂).
-    /// The QR factorization is of the permuted design X̃·P, so the directly-computed
-    /// (R'R)⁻¹ is in permuted coordinates. We apply the forward permutation to
-    /// recover (X̃'X̃)⁻¹: `out[perm[i], perm[j]] = a[i, j]`.
     fn cov_unscaled_inner(&self) -> &Mat<f64> {
         self.cov_unscaled.get_or_init(|| {
             let p = self.p;
-            // Start with identity; apply two triangular solves to form (R'R)⁻¹.
-            // (1) Solve R' · A = I  ⟹  A = R'⁻¹
-            //     R is upper-triangular, so R' is lower-triangular.
-            //     Use solve_lower_triangular_in_place on R.transpose().
-            // (2) Solve R · A = A  ⟹  A = R⁻¹ · R'⁻¹ = (R'R)⁻¹
             let mut a: Mat<f64> = Mat::identity(p, p);
 
-            // Step (1): solve R' a = I  (R.transpose() is lower-triangular)
-            solve_lower_triangular_in_place(
+            // (1) R' a = I  (R' is lower-triangular = R transposed)
+            triangular_solve::solve_lower_triangular_in_place(
                 self.r_factor.as_ref().transpose(),
                 a.as_mut(),
-                faer::Par::Seq,
+                Par::Seq,
             );
-
-            // Step (2): solve R a = a
-            solve_upper_triangular_in_place(
+            // (2) R a = a
+            triangular_solve::solve_upper_triangular_in_place(
                 self.r_factor.as_ref(),
                 a.as_mut(),
-                faer::Par::Seq,
+                Par::Seq,
             );
 
-            // a is now (R'R)⁻¹ in pivoted coordinates.
-            // Unpermute: out[perm[i], perm[j]] = a[i, j].
+            // a is now (R'R)⁻¹ in pivoted coordinates. Unpermute.
             let mut out: Mat<f64> = Mat::zeros(p, p);
             for i in 0..p {
                 for j in 0..p {
-                    *out.get_mut(self.perm[i], self.perm[j]) = *a.get(i, j);
+                    out[(self.perm[i], self.perm[j])] = a[(i, j)];
                 }
             }
             out
         })
     }
 
-    fn classical_std_err_inner(&self) -> &Col<f64> {
-        self.std_err_classical.get_or_init(|| {
-            let cov = self.cov_unscaled_inner();
-            Col::from_fn(self.p, |i| (*cov.get(i, i) * self.sigma2).sqrt())
-        })
+    fn classical_std_err_inner(&self) -> &[f64] {
+        self.std_err_classical
+            .get_or_init(|| {
+                let cov = self.cov_unscaled_inner();
+                (0..self.p)
+                    .map(|i| (cov[(i, i)] * self.sigma2).sqrt())
+                    .collect()
+            })
+            .as_slice()
     }
 
     /// Standard errors from the classical (non-robust) covariance estimator.
-    pub fn std_err(&self) -> ColRef<'_, f64> {
-        self.classical_std_err_inner().as_ref()
+    pub fn std_err(&self) -> &[f64] {
+        self.classical_std_err_inner()
     }
 
     /// t-statistics from the classical covariance: β̂ᵢ / SE(β̂ᵢ).
-    pub fn t_values(&self) -> Col<f64> {
-        let beta = self.coef.as_ref();
+    pub fn t_values(&self) -> Vec<f64> {
         let se = self.classical_std_err_inner();
-        Col::from_fn(self.p, |i| *beta.get(i) / *se.get(i))
+        (0..self.p).map(|i| self.coef[i] / se[i]).collect()
     }
 
-    /// Two-sided p-values from the classical covariance using the t-distribution
-    /// with `df_resid` degrees of freedom.
-    pub fn p_values(&self) -> Col<f64> {
+    /// Two-sided p-values from the classical covariance using the t-distribution.
+    pub fn p_values(&self) -> Vec<f64> {
         let t = self.t_values();
         let df = self.df_resid() as f64;
-        Col::from_fn(self.p, |i| crate::distributions::t_two_sided_pvalue(*t.get(i), df))
+        t.iter()
+            .map(|&ti| crate::distributions::t_two_sided_pvalue(ti, df))
+            .collect()
     }
 
     /// Confidence intervals as a (p × 2) matrix with columns `[lower, upper]`,
@@ -163,48 +152,42 @@ impl OlsResults {
     /// # Panics
     ///
     /// Panics if `alpha` is not in the open interval (0, 1).
-    /// For a `Result`-returning version, use `conf_int_with` (Task 11).
     pub fn conf_int(&self, alpha: f64) -> Mat<f64> {
         assert!(
             alpha > 0.0 && alpha < 1.0,
             "alpha must be in (0, 1); use conf_int_with for a Result-returning version"
         );
         let crit = crate::distributions::t_quantile(1.0 - alpha / 2.0, self.df_resid() as f64);
-        let beta = self.coef.as_ref();
         let se = self.classical_std_err_inner();
         Mat::from_fn(self.p, 2, |i, j| match j {
-            0 => *beta.get(i) - crit * *se.get(i),
-            _ => *beta.get(i) + crit * *se.get(i),
+            0 => self.coef[i] - crit * se[i],
+            _ => self.coef[i] + crit * se[i],
         })
     }
 
     /// Compute SE/t/p for the requested covariance estimator.
-    ///
-    /// Follows statsmodels convention: NonRobust uses t-distribution with
-    /// `df_resid`; HC0–HC3 use the standard normal (z) distribution.
     pub fn inference(&self, cov: CovType) -> Inference {
         use crate::distributions::{t_two_sided_pvalue, z_two_sided_pvalue};
-        let cov_mat = self.cov(cov);
-        let beta = self.coef.as_ref();
+        let cov_mat = self.cov_internal(cov);
         let df = self.df_resid() as f64;
-        let std_err = Col::from_fn(self.p, |i| (*cov_mat.get(i, i)).sqrt());
-        let t_values = Col::from_fn(self.p, |i| *beta.get(i) / *std_err.get(i));
-        let p_values = match cov {
-            CovType::NonRobust => {
-                Col::from_fn(self.p, |i| t_two_sided_pvalue(*t_values.get(i), df))
-            }
+        let std_err: Vec<f64> = (0..self.p)
+            .map(|i| cov_mat[(i, i)].sqrt())
+            .collect();
+        let t_values: Vec<f64> = (0..self.p).map(|i| self.coef[i] / std_err[i]).collect();
+        let p_values: Vec<f64> = match cov {
+            CovType::NonRobust => t_values.iter().map(|&t| t_two_sided_pvalue(t, df)).collect(),
             CovType::HC0 | CovType::HC1 | CovType::HC2 | CovType::HC3 => {
-                Col::from_fn(self.p, |i| z_two_sided_pvalue(*t_values.get(i)))
+                t_values.iter().map(|&t| z_two_sided_pvalue(t)).collect()
             }
         };
-        Inference { std_err, t_values, p_values }
+        Inference {
+            std_err,
+            t_values,
+            p_values,
+        }
     }
 
     /// Confidence intervals for the requested covariance, returning Result.
-    /// `alpha` must be in `(0, 1)` exclusive.
-    ///
-    /// Follows statsmodels convention: NonRobust uses t-distribution with
-    /// `df_resid`; HC0–HC3 use the standard normal (z) distribution.
     pub fn conf_int_with(&self, cov: CovType, alpha: f64) -> Result<Mat<f64>, crate::error::OlsError> {
         if !(alpha > 0.0 && alpha < 1.0) {
             return Err(crate::error::OlsError::InvalidAlpha(alpha));
@@ -218,51 +201,44 @@ impl OlsResults {
                 crate::distributions::z_quantile(1.0 - alpha / 2.0)
             }
         };
-        let beta = self.coef.as_ref();
         Ok(Mat::from_fn(self.p, 2, |i, j| match j {
-            0 => *beta.get(i) - crit * *inf.std_err.get(i),
-            _ => *beta.get(i) + crit * *inf.std_err.get(i),
+            0 => self.coef[i] - crit * inf.std_err[i],
+            _ => self.coef[i] + crit * inf.std_err[i],
         }))
     }
 
-    /// HC0 sandwich covariance: (X'X)⁻¹ · Σ(eᵢ² xᵢxᵢ') · (X'X)⁻¹.
+    /// HC0 sandwich covariance.
     pub fn cov_hc0(&self) -> Mat<f64> { sandwich(self, &weights_hc0(self)) }
-
-    /// HC1 sandwich covariance: HC0 scaled by n/(n-p).
     pub fn cov_hc1(&self) -> Mat<f64> { sandwich(self, &weights_hc1(self)) }
-
-    /// HC2 sandwich covariance: eᵢ² divided by (1 − hᵢᵢ).
     pub fn cov_hc2(&self) -> Mat<f64> { sandwich(self, &weights_hc2(self)) }
-
-    /// HC3 sandwich covariance: eᵢ² divided by (1 − hᵢᵢ)².
     pub fn cov_hc3(&self) -> Mat<f64> { sandwich(self, &weights_hc3(self)) }
 
     /// Coefficient covariance matrix for the requested estimator.
     pub fn cov(&self, cov_type: CovType) -> Mat<f64> {
+        self.cov_internal(cov_type)
+    }
+
+    /// Internal helper: same as [`cov`] but kept private so the lazy
+    /// `cov_unscaled` cache stays inside this module.
+    fn cov_internal(&self, cov_type: CovType) -> Mat<f64> {
         match cov_type {
             CovType::NonRobust => {
                 let unscaled = self.cov_unscaled_inner();
-                Mat::from_fn(self.p, self.p, |i, j| *unscaled.get(i, j) * self.sigma2)
+                Mat::from_fn(self.p, self.p, |i, j| unscaled[(i, j)] * self.sigma2)
             }
-            CovType::HC0 => self.cov_hc0(),
-            CovType::HC1 => self.cov_hc1(),
-            CovType::HC2 => self.cov_hc2(),
-            CovType::HC3 => self.cov_hc3(),
+            CovType::HC0 => sandwich(self, &weights_hc0(self)),
+            CovType::HC1 => sandwich(self, &weights_hc1(self)),
+            CovType::HC2 => sandwich(self, &weights_hc2(self)),
+            CovType::HC3 => sandwich(self, &weights_hc3(self)),
         }
     }
 
     /// Point prediction: ŷ_new = X̃_new · β̂.
-    ///
-    /// `x_new` must have the same number of columns as the original predictor matrix
-    /// (excluding the intercept column, if any). Returns a column vector of predictions.
-    pub fn predict(&self, x_new: MatRef<'_, f64>) -> Result<Col<f64>, crate::error::OlsError> {
+    pub fn predict(&self, x_new: MatRef<'_, f64>) -> Result<Vec<f64>, crate::error::OlsError> {
         predict_impl(self, x_new)
     }
 
     /// Prediction intervals: returns an `n_new × 3` matrix with columns `[fit, lower, upper]`.
-    ///
-    /// Uses `ŷ ± t_{1-α/2} · sqrt(σ̂²(1 + xᵀ(X̃'X̃)⁻¹x))`.
-    /// `alpha` must be in `(0, 1)` exclusive.
     pub fn predict_interval(
         &self,
         x_new: MatRef<'_, f64>,
@@ -271,9 +247,7 @@ impl OlsResults {
         predict_interval_impl(self, x_new, alpha)
     }
 
-    /// Set human-readable names for each coefficient (length must equal `p`,
-    /// where the first name corresponds to the intercept when present).
-    /// Panics if `names.len() != p`.
+    /// Set human-readable names for each coefficient (length must equal `p`).
     pub fn with_names(mut self, names: Vec<String>) -> Self {
         assert!(names.len() == self.p,
             "names length {} != p {}", names.len(), self.p);
@@ -281,20 +255,16 @@ impl OlsResults {
         self
     }
 
-    /// Return coefficient names if set; otherwise None.
     pub fn names(&self) -> Option<&[String]> {
         self.names.as_deref()
     }
 
-    /// Whether the model was fit with an intercept column.
     pub fn has_intercept(&self) -> bool { self.has_intercept }
 
-    /// Render a statsmodels-style monospace summary using classical (non-robust) SEs.
     pub fn summary(&self) -> String {
         crate::regression::summary::render(self, CovType::NonRobust)
     }
 
-    /// Render a statsmodels-style monospace summary using the specified covariance estimator.
     pub fn summary_with(&self, cov: CovType) -> String {
         crate::regression::summary::render(self, cov)
     }

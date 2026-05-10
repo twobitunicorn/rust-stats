@@ -43,23 +43,23 @@ pub(crate) fn render(res: &OlsResults, cov: CovType) -> String {
     let labels: Vec<&str> = match user_names {
         Some(ns) => ns.iter().map(|n| n.as_str()).collect(),
         None => {
-            let mut v: Vec<&str> = Vec::with_capacity(beta.nrows());
+            let mut v: Vec<&str> = Vec::with_capacity(beta.len());
             if res.has_intercept() { v.push("const"); }
             for n in &default_predictor_names { v.push(n.as_str()); }
             v
         }
     };
 
-    for i in 0..beta.nrows() {
+    for i in 0..beta.len() {
         let _ = writeln!(s,
             "{:<10} {} {} {} {} {} {}",
             labels[i],
-            fmt_num(*beta.get(i)),
-            fmt_num(*inf.std_err.get(i)),
-            fmt_num(*inf.t_values.get(i)),
-            fmt_num(*inf.p_values.get(i)),
-            fmt_num(*ci.get(i, 0)),
-            fmt_num(*ci.get(i, 1)),
+            fmt_num(beta[i]),
+            fmt_num(inf.std_err[i]),
+            fmt_num(inf.t_values[i]),
+            fmt_num(inf.p_values[i]),
+            fmt_num(ci[(i, 0)]),
+            fmt_num(ci[(i, 1)]),
         );
     }
     let _ = writeln!(s, "{line_eq}");

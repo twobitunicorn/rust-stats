@@ -3,8 +3,7 @@
 //! Uses a hard-coded copy of the classic Longley macroeconomic dataset
 //! and prints the OLS fit summary.
 
-use faer::{Col, Mat};
-use rust_stats::Ols;
+use rust_stats::{Matrix, Ols};
 
 const Y: [f64; 16] = [
     60323.0, 61122.0, 60171.0, 61187.0, 63221.0, 63639.0, 64989.0, 63761.0,
@@ -32,9 +31,8 @@ const X: [[f64; 6]; 16] = [
 ];
 
 fn main() {
-    let y: Col<f64> = Col::from_fn(Y.len(), |i| Y[i]);
-    let x: Mat<f64> = Mat::from_fn(X.len(), 6, |i, j| X[i][j]);
-    let res = Ols::new(y.as_ref(), x.as_ref())
+    let x = Matrix::from_fn(X.len(), 6, |i, j| X[i][j]);
+    let res = Ols::new(&Y, x.as_ref())
         .fit()
         .expect("Longley fit")
         .with_names(vec![
