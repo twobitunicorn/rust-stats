@@ -5,8 +5,6 @@
 pub mod decompose;
 pub mod stl;
 
-use faer::Col;
-
 pub use decompose::seasonal_decompose;
 pub use stl::stl;
 
@@ -20,9 +18,9 @@ pub use stl::stl;
 /// moving average can't be computed.
 #[derive(Debug, Clone)]
 pub struct Decomposition {
-    pub trend: Col<f64>,
-    pub seasonal: Col<f64>,
-    pub residual: Col<f64>,
+    pub trend: Vec<f64>,
+    pub seasonal: Vec<f64>,
+    pub residual: Vec<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

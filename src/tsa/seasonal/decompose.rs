@@ -11,10 +11,9 @@
 
 use crate::error::SeasonalDecomposeError;
 use crate::tsa::seasonal::{DecomposeMode, Decomposition, SeasonalDecomposeOpts};
-use faer::{Col, ColRef};
 
 pub fn seasonal_decompose(
-    y: ColRef<'_, f64>,
+    y: &[f64],
     opts: SeasonalDecomposeOpts,
 ) -> Result<Decomposition, SeasonalDecomposeError> {
     if opts.period < 2 {
@@ -22,13 +21,13 @@ pub fn seasonal_decompose(
     }
     let period = opts.period as usize;
 
-    if y.nrows() == 0 {
+    if y.is_empty() {
         return Err(SeasonalDecomposeError::SeriesTooShort {
             n: 0,
             min: 2 * period,
         });
     }
-    let raw: Vec<f64> = y.iter().copied().collect();
+    let raw: Vec<f64> = y.to_vec();
     if raw.iter().any(|v| !v.is_finite()) {
         return Err(SeasonalDecomposeError::NonFinite);
     }
@@ -105,10 +104,11 @@ pub fn seasonal_decompose(
         (trend, seasonal, residual)
     };
 
+    let _ = n;
     Ok(Decomposition {
-        trend: Col::<f64>::from_fn(n, |i| trend[i]),
-        seasonal: Col::<f64>::from_fn(n, |i| seasonal[i]),
-        residual: Col::<f64>::from_fn(n, |i| residual[i]),
+        trend,
+        seasonal,
+        residual,
     })
 }
 

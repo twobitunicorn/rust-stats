@@ -11,7 +11,6 @@
 //! No robustness iterations — this is single-pass (non-robust) LOESS.
 
 use crate::error::LoessError;
-use faer::{Col, ColRef};
 use rayon::prelude::*;
 
 /// Smooth the input series at every integer position `0..n`.
@@ -19,20 +18,17 @@ use rayon::prelude::*;
 /// `span` is the fraction of points used in each local fit (0 < span <= 1);
 /// `degree` is the polynomial degree (0, 1, or 2).
 pub fn loess(
-    y: ColRef<'_, f64>,
+    y: &[f64],
     span: f64,
     degree: u8,
-) -> Result<Col<f64>, LoessError> {
+) -> Result<Vec<f64>, LoessError> {
     validate_loess_args(y, span, degree)?;
-    let vec: Vec<f64> = y.iter().copied().collect();
-    let slice = vec.as_slice();
-    let n = slice.len();
+    let n = y.len();
     let degree_us = degree as usize;
     let window = ((span * n as f64).ceil() as usize)
         .max(degree_us + 2)
         .min(n);
-    let smoothed = loess_compute(slice, window, degree_us);
-    Ok(Col::<f64>::from_fn(smoothed.len(), |i| smoothed[i]))
+    Ok(loess_compute(y, window, degree_us))
 }
 
 /// Fitted LOESS value at a single (possibly fractional) query point `xq`.
@@ -40,20 +36,18 @@ pub fn loess(
 /// boundary slice, giving LOESS extrapolation by extension of the
 /// boundary fit. Used by STL's cycle-subseries one-period extrapolation.
 pub fn loess_at(
-    y: ColRef<'_, f64>,
+    y: &[f64],
     xq: f64,
     span: f64,
     degree: u8,
 ) -> Result<f64, LoessError> {
     validate_loess_args(y, span, degree)?;
-    let vec: Vec<f64> = y.iter().copied().collect();
-    let slice = vec.as_slice();
-    let n = slice.len();
+    let n = y.len();
     let degree_us = degree as usize;
     let window = ((span * n as f64).ceil() as usize)
         .max(degree_us + 2)
         .min(n);
-    Ok(local_poly_fit_at_xf64(slice, xq, window, degree_us))
+    Ok(local_poly_fit_at_xf64(y, xq, window, degree_us))
 }
 
 // Internal helpers below are `pub(crate)` so `tsa::seasonal::stl` (Task 4)
@@ -118,7 +112,7 @@ pub(crate) fn gauss_solve_n(
 }
 
 fn validate_loess_args(
-    y: ColRef<'_, f64>,
+    y: &[f64],
     span: f64,
     degree: u8,
 ) -> Result<(), LoessError> {
@@ -128,7 +122,7 @@ fn validate_loess_args(
     if degree > 2 {
         return Err(LoessError::InvalidDegree(degree));
     }
-    if y.nrows() == 0 {
+    if y.is_empty() {
         return Err(LoessError::Empty);
     }
     if y.iter().any(|v| !v.is_finite()) {

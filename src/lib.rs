@@ -16,7 +16,7 @@ pub mod tsa;
 
 // Re-export the matrix types so downstream crates don't need a direct
 // faer dep just to call us.
-pub use faer::{Mat as Matrix, MatRef as MatrixView};
+pub use faer::{Mat as Matrix, MatRef as Block, MatRef as SubMatrix};
 
 pub use distributions::{f_sf, t_cdf, t_quantile, t_two_sided_pvalue, z_quantile, z_two_sided_pvalue};
 pub use error::{LoessError, OlsError, SeasonalDecomposeError, StlError};

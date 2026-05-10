@@ -14,7 +14,6 @@
 use crate::error::StlError;
 use crate::smoothing::loess::{local_poly_fit_at_xf64, loess_compute};
 use crate::tsa::seasonal::{DecomposeMode, Decomposition, StlOpts};
-use faer::{Col, ColRef};
 
 /// Cleveland 1990 STL.
 ///
@@ -24,7 +23,7 @@ use faer::{Col, ColRef};
 ///
 /// All tunable parameters live on `StlOpts` — use `StlOpts::new(period)`
 /// for Cleveland defaults and override fields with struct-update syntax.
-pub fn stl(y: ColRef<'_, f64>, opts: StlOpts) -> Result<Decomposition, StlError> {
+pub fn stl(y: &[f64], opts: StlOpts) -> Result<Decomposition, StlError> {
     if opts.period < 2 {
         return Err(StlError::InvalidPeriod(opts.period));
     }
@@ -54,14 +53,14 @@ pub fn stl(y: ColRef<'_, f64>, opts: StlOpts) -> Result<Decomposition, StlError>
         return Err(StlError::InvalidInnerIters);
     }
 
-    if y.nrows() == 0 {
+    if y.is_empty() {
         return Err(StlError::SeriesTooShort {
             n: 0,
             min: 2 * period,
         });
     }
 
-    let raw: Vec<f64> = y.iter().copied().collect();
+    let raw: Vec<f64> = y.to_vec();
     if raw.iter().any(|v| !v.is_finite()) {
         return Err(StlError::NonFinite);
     }
@@ -104,10 +103,11 @@ pub fn stl(y: ColRef<'_, f64>, opts: StlOpts) -> Result<Decomposition, StlError>
         (trend, seasonal, residual)
     };
 
+    let _ = n;
     Ok(Decomposition {
-        trend: Col::<f64>::from_fn(n, |i| trend[i]),
-        seasonal: Col::<f64>::from_fn(n, |i| seasonal[i]),
-        residual: Col::<f64>::from_fn(n, |i| residual[i]),
+        trend,
+        seasonal,
+        residual,
     })
 }
 

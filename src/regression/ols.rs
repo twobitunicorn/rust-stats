@@ -3,8 +3,8 @@
 use crate::error::OlsError;
 use crate::regression::design::build_design_matrix;
 use crate::regression::results::OlsResults;
+use crate::{Matrix, Block};
 use faer::prelude::SolveLstsq;
-use faer::{Mat, MatRef};
 use once_cell::sync::OnceCell;
 
 /// Ordinary least squares model builder.
@@ -13,12 +13,12 @@ use once_cell::sync::OnceCell;
 /// at fit time unless `without_intercept` is called.
 pub struct Ols<'a> {
     pub(crate) y: &'a [f64],
-    pub(crate) x: MatRef<'a, f64>,
+    pub(crate) x: Block<'a, f64>,
     pub(crate) intercept: bool,
 }
 
 impl<'a> Ols<'a> {
-    pub fn new(y: &'a [f64], x: MatRef<'a, f64>) -> Self {
+    pub fn new(y: &'a [f64], x: Block<'a, f64>) -> Self {
         Self { y, x, intercept: true }
     }
 
@@ -75,7 +75,7 @@ impl<'a> Ols<'a> {
         }
 
         // ----- 5. Solve for β̂ -----
-        let y_mat: Mat<f64> = Mat::from_fn(n, 1, |i, _| self.y[i]);
+        let y_mat: Matrix<f64> = Matrix::from_fn(n, 1, |i, _| self.y[i]);
         let beta_mat = qr.solve_lstsq(y_mat.as_ref());
         let coef: Vec<f64> = (0..p).map(|i| beta_mat[(i, 0)]).collect();
 
@@ -102,7 +102,7 @@ impl<'a> Ols<'a> {
             .collect();
 
         // ----- 8. Extract R for storage -----
-        let r_factor: Mat<f64> = qr.thin_R().to_owned();
+        let r_factor: Matrix<f64> = qr.thin_R().to_owned();
 
         // ----- 9. Build OlsResults -----
         Ok(OlsResults {

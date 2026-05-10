@@ -4,11 +4,12 @@ use crate::distributions::t_quantile;
 use crate::error::OlsError;
 use crate::regression::design::build_design_matrix;
 use crate::regression::results::OlsResults;
+use crate::{Matrix, Block};
 use faer::linalg::triangular_solve;
-use faer::{Mat, MatRef, Par};
+use faer::Par;
 
 /// Point prediction: ŷ_new = X̃_new · β̂.
-pub(crate) fn predict(res: &OlsResults, x_new: MatRef<'_, f64>) -> Result<Vec<f64>, OlsError> {
+pub(crate) fn predict(res: &OlsResults, x_new: Block<'_, f64>) -> Result<Vec<f64>, OlsError> {
     let expected = res.p - usize::from(res.has_intercept);
     if x_new.ncols() != expected {
         return Err(OlsError::NewXShapeMismatch { got: x_new.ncols(), expected });
@@ -25,9 +26,9 @@ pub(crate) fn predict(res: &OlsResults, x_new: MatRef<'_, f64>) -> Result<Vec<f6
 /// Returns an `n_new × 3` matrix with columns `[fit, lower, upper]`.
 pub(crate) fn predict_interval(
     res: &OlsResults,
-    x_new: MatRef<'_, f64>,
+    x_new: Block<'_, f64>,
     alpha: f64,
-) -> Result<Mat<f64>, OlsError> {
+) -> Result<Matrix<f64>, OlsError> {
     if !(alpha > 0.0 && alpha < 1.0) {
         return Err(OlsError::InvalidAlpha(alpha));
     }
@@ -44,10 +45,10 @@ pub(crate) fn predict_interval(
         .collect();
     let crit = t_quantile(1.0 - alpha / 2.0, res.df_resid() as f64);
 
-    let mut out: Mat<f64> = Mat::zeros(n_new, 3);
+    let mut out: Matrix<f64> = Matrix::zeros(n_new, 3);
     for i in 0..n_new {
         // z = pivoted row i of x_aug, as a p×1 column.
-        let mut z: Mat<f64> = Mat::zeros(p, 1);
+        let mut z: Matrix<f64> = Matrix::zeros(p, 1);
         for k in 0..p {
             z[(k, 0)] = x_aug[(i, res.perm[k])];
         }
