@@ -1,12 +1,10 @@
 //! rust-stats: pure-Rust statistical modeling.
 //!
-//! This crate covers smoothing and seasonal-trend decomposition: LOESS,
-//! Cleveland 1990 STL, and classical seasonal_decompose. OLS regression
-//! lives in the sibling crate `rust-stats-ols`.
+//! Smoothing and seasonal-trend decomposition: LOESS, Cleveland 1990 STL,
+//! and classical seasonal_decompose.
 //!
-//! Linear algebra (dense matrix type, column-pivoted QR, triangular solves)
-//! comes from the `faer` crate, which is re-exported below so callers don't
-//! need a direct `faer` dependency.
+//! Linear algebra comes from the `faer` crate, which is re-exported below
+//! so callers don't need a direct `faer` dependency.
 
 pub mod distributions;
 pub mod error;

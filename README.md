@@ -1,31 +1,22 @@
 # rust-stats
 
-Pure-Rust statistical modeling, statsmodels-inspired. Ordinary least squares
-with classical and heteroskedasticity-consistent inference, LOESS smoothing,
+Pure-Rust statistical modeling, statsmodels-inspired. LOESS smoothing
 and Cleveland 1990 STL / classical seasonal decomposition.
 
 ```rust
-use rust_stats::{Matrix, Ols};
+use rust_stats::{stl, StlOpts};
 
-let x = Matrix::from_fn(n, p, |i, j| /* ... */);
-let res = Ols::new(&y, x.as_ref()).fit().unwrap();
-
-println!("β = {:?}", res.coef());
-println!("R² = {:.4}", res.r_squared());
-
-let inf = res.inference(rust_stats::CovType::HC3);
-println!("HC3 std errors = {:?}", inf.std_err);
+let decomp = stl(&y, StlOpts::new(12)).unwrap();
+// decomp.trend, decomp.seasonal, decomp.residual reconstruct y exactly.
 ```
 
 ## Features
 
-- **OLS** — column-pivoted QR via faer; classical, HC0/HC1/HC2/HC3 covariance;
-  predict + 95% prediction intervals; rank-deficient inputs error rather than
-  silently pseudo-invert.
 - **LOESS** — single-pass tricube-weighted local polynomial smoother
   (degree 0/1/2), parallelised with rayon.
 - **STL** — Cleveland 1990 STL with the standard inner-loop, additive and
-  multiplicative.
+  multiplicative; supports `seasonal_jump` / `trend_jump` / `low_pass_jump`
+  to trade accuracy for speed (Cleveland 1990, §3).
 - **seasonal_decompose** — classical centered moving-average decomposition,
   additive and multiplicative, matching statsmodels exactly.
 - **Apache Arrow interop** (optional, `arrow` feature) — thin adapters so
@@ -43,9 +34,6 @@ rust-stats = { version = "...", features = ["arrow"] }
 ```rust
 use rust_stats::arrow_compat;
 use rust_stats::StlOpts;
-
-let res = arrow_compat::fit_ols(&y_arr, &design_batch)?;
-println!("{}", res.summary());              // field names flow into the summary
 
 let smoothed = arrow_compat::loess(&series, 0.3, 1)?;
 let decomp   = arrow_compat::stl(&series, StlOpts::new(12))?;
@@ -92,8 +80,6 @@ runs without Python.
 
 | Module | Tolerance vs statsmodels |
 | --- | --- |
-| `Ols` (coef, residuals, fitted, R², F, predictions) | 1e-10 |
-| `Ols::inference` (SE, t, p, 95% CI) for nonrobust + HC0–HC3 | ~1e-7 |
 | `seasonal_decompose` (additive, multiplicative) | 1e-12 |
 | `loess` (degree 1) vs `statsmodels.nonparametric.lowess(it=0)` | ≤ 0.04 abs |
 | `stl` — reconstruction identity (`y = T+S+R` or `y = T·S·R`) | 1e-10 |
@@ -111,14 +97,9 @@ Wall-clock per call, median of warmed runs, on **Apple M2 Pro / macOS**
 
 | Operation | Size | rust-stats | statsmodels | Speedup |
 | --- | --- | ---: | ---: | ---: |
-| OLS + nonrobust inference | n=100, p=5    | 0.019 ms | 0.084 ms |   4.4× |
-| OLS + nonrobust inference | n=1 000, p=10  | 0.275 ms | 0.265 ms |   1.0× |
-| OLS + nonrobust inference | n=10 000, p=20 | 2.908 ms | 3.811 ms |   1.3× |
-| OLS + HC3 inference       | n=1 000, p=10  | 0.362 ms | 0.419 ms |   1.2× |
-| OLS + HC3 inference       | n=10 000, p=20 | 7.279 ms | 10.640 ms |  1.5× |
-| LOESS (deg=1, span=0.3)   | n=100          | 0.033 ms | 0.576 ms |  17×   |
-| LOESS (deg=1, span=0.3)   | n=1 000        | 0.460 ms | 7.859 ms |  17×   |
-| LOESS (deg=1, span=0.3)   | n=5 000        | 7.146 ms | 80.711 ms| 11×   |
+| LOESS (deg=1, span=0.3)   | n=100              | 0.033 ms | 0.576 ms |  17×   |
+| LOESS (deg=1, span=0.3)   | n=1 000            | 0.460 ms | 7.859 ms |  17×   |
+| LOESS (deg=1, span=0.3)   | n=5 000            | 7.146 ms | 80.711 ms| 11×   |
 | STL                       | n=144,  period=12  | 0.175 ms | 0.323 ms |   1.8× |
 | STL                       | n=720,  period=12  | 0.696 ms | 1.570 ms |   2.3× |
 | STL                       | n=2 880, period=24 | 1.702 ms | 11.547 ms |  6.8× |
@@ -158,8 +139,6 @@ cargo run --release --features arrow --example bench      # adds batched section
 python3 tests/golden/bench_statsmodels.py
 ```
 
-OLS times are close because both implementations call into LAPACK-class
-routines (faer / OpenBLAS) — the Rust win comes from less per-call setup.
 LOESS gains a parallel inner loop. `seasonal_decompose` is an O(n) routine
 where Python-side overhead dominates at small n. Batched variants add a
 second layer of parallelism (rayon over columns) for multi-series workloads.

@@ -1,6 +1,3 @@
-[workspace]
-members = [".", "rust-stats-ols"]
-
 [package]
 name = "rust-stats"
 version = "0.1.0"

@@ -1,9 +1,6 @@
 //! Benchmark rust-stats on synthetic datasets and print median wall-clock
 //! per call. Pair with `tests/golden/bench_statsmodels.py` for parity.
 //!
-//! OLS benches live in the sibling crate
-//! (`cargo run --release -p rust-stats-ols --example bench`).
-//!
 //! Run with:
 //!   cargo run --release --example bench
 //!   cargo run --release --features arrow --example bench   # adds batched section
