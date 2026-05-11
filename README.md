@@ -118,28 +118,35 @@ so we're comparing per-point fits in both directions.
 
 Decomposing 50 independent series at once. rust-stats parallelises over
 columns with rayon (`arrow_compat::*_batch`, `arrow` feature enabled);
-`loess_batch` (degree 0/1) additionally runs through a `pulp`-dispatched
-cross-column SIMD kernel — one source compiles to scalar, NEON, AVX2,
-and AVX-512 paths and `Arch::new()` picks the right one at runtime.
+with the `simd` feature on (nightly only), `loess_batch` (degree 0/1)
+additionally runs through a `std::simd::f64x4` cross-column kernel —
+LLVM lowers it to NEON / AVX2 / scalar as appropriate. Without `simd`,
+`loess_batch` falls back to rayon-over-columns scalar LOESS.
 statsmodels has no native batched form, so the Python column is a
 straight Python loop over the same 50 series.
 
 | Operation | Size | rust-stats `*_batch` | statsmodels loop | R loop |
 | --- | --- | ---: | ---: | ---: |
-| `stl_batch`                | 50 × n=720,   period=12 |   5.8 ms |    77.8 ms |    17.3 ms |
-| `stl_batch`                | 50 × n=1 000, period=12 |   7.9 ms |   108.1 ms |    24.3 ms |
-| `stl_batch`                | 50 × n=2 880, period=24 |  30.7 ms |   586.0 ms |   119.7 ms |
-| `seasonal_decompose_batch` | 50 × n=720,   period=12 |   0.19 ms |    5.98 ms |    35.2 ms |
-| `seasonal_decompose_batch` | 50 × n=1 000, period=12 |   0.21 ms |    5.91 ms |    37.8 ms |
-| `seasonal_decompose_batch` | 50 × n=2 880, period=24 |   0.46 ms |    10.9 ms |    56.3 ms |
-| `loess_batch` (SIMD+rayon) | 50 × n=1 000, span=0.3  |   2.2 ms |   385.4 ms |    80.7 ms |
-| `loess_batch` (SIMD+rayon) | 50 × n=5 000, span=0.3  |  48.8 ms |  4041.9 ms |  1971.1 ms |
+| `stl_batch`                | 50 × n=720,   period=12 |   6.2 ms |    77.8 ms |    17.3 ms |
+| `stl_batch`                | 50 × n=1 000, period=12 |   8.3 ms |   108.1 ms |    24.3 ms |
+| `stl_batch`                | 50 × n=2 880, period=24 |  33.0 ms |   586.0 ms |   119.7 ms |
+| `seasonal_decompose_batch` | 50 × n=720,   period=12 |   0.18 ms |    5.98 ms |    35.2 ms |
+| `seasonal_decompose_batch` | 50 × n=1 000, period=12 |   0.19 ms |    5.91 ms |    37.8 ms |
+| `seasonal_decompose_batch` | 50 × n=2 880, period=24 |   0.38 ms |    10.9 ms |    56.3 ms |
+| `loess_batch` (simd)       | 50 × n=1 000, span=0.3  |   1.7 ms |   385.4 ms |    80.7 ms |
+| `loess_batch` (simd)       | 50 × n=5 000, span=0.3  |  36.6 ms |  4041.9 ms |  1971.1 ms |
+
+`loess_batch` numbers are with the `simd` feature on; without it (stable
+Rust, no nightly), the rayon-only fallback runs at ~14 ms / ~330 ms — a
+factor of ~8× slower than the SIMD path, still ~30× faster than
+statsmodels.
 
 Reproduce with:
 
 ```sh
-cargo run --release --example bench                       # core benches
-cargo run --release --features arrow --example bench      # adds batched section
+cargo run --release --example bench                              # core benches
+cargo run --release --features arrow --example bench              # + batched (stable, scalar fallback)
+cargo +nightly run --release --features arrow,simd --example bench # + batched, SIMD on
 python3 tests/golden/bench_statsmodels.py
 Rscript tests/golden/bench_r.R
 ```
