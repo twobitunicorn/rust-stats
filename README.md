@@ -332,27 +332,6 @@ On batched workloads R has no native form and we lead consistently
 (3–4× on `stl_batch`, ~40× on `loess_batch`, ~180× on
 `seasonal_decompose_batch`).
 
-### Head-to-head: R vs statsmodels
-
-Same workloads, statsmodels' time divided by R's time. Ratios > 1 mean R
-is faster.
-
-| Operation | n=144/100 | n=720/1 000 | n=2 880/5 000 |
-| --- | ---: | ---: | ---: |
-| LOESS               | R 27× | R 4.6× | R 2.0× |
-| STL                 | R 2.8× | R 4.5× | R 4.9× |
-| seasonal_decompose  | statsmodels 4.9× | statsmodels 5.8× | statsmodels 5.4× |
-
-| Batched (50 series) | n=720 / 1 000 | n=1 000 | n=2 880 / 5 000 |
-| --- | ---: | ---: | ---: |
-| stl_batch loop                 | R 4.2× | R 4.3× | R 4.7× |
-| seasonal_decompose_batch loop  | statsmodels 6.0× | statsmodels 6.5× | statsmodels 5.4× |
-| loess_batch loop               | — | R 4.7× | R 1.9× |
-
-R's stl/lowess Fortran beats statsmodels' Python port by 2–27×.
-statsmodels' `seasonal_decompose` (a thin NumPy MA implementation) beats
-R's `decompose()` by ~5–6× because R's wrapper does more per call.
-
 ## License
 
 MIT OR Apache-2.0.
