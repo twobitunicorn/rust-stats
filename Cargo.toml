@@ -6,7 +6,6 @@ license = "MIT OR Apache-2.0"
 description = "Pure-Rust statistical modeling: LOESS, STL, seasonal_decompose"
 
 [dependencies]
-faer = "0.22"
 statrs = "0.18"
 thiserror = "2"
 once_cell = "1"

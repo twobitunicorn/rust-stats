@@ -1,9 +1,9 @@
 //! Apache Arrow adapters for rust-stats. Enabled with the `arrow` feature.
 //!
 //! Thin wrappers that unpack `Float64Array` / `RecordBatch` into the
-//! borrowed-slice and `Matrix<f64>` forms the core API uses, then
-//! repackage the outputs as Arrow. The point is interop with Polars,
-//! DataFusion, DuckDB, PyArrow, and Parquet — not a performance win.
+//! borrowed-slice form the core API uses, then repackage the outputs as
+//! Arrow. The point is interop with Polars, DataFusion, DuckDB, PyArrow,
+//! and Parquet — not a performance win.
 //!
 //! Null policy: any null in an input array returns `ArrowError::HasNulls`.
 //! Use `arrow::compute::filter` or Polars' `drop_nulls` upstream if you
