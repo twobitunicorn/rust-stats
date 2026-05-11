@@ -133,19 +133,22 @@ Wall-clock per call, median of warmed runs, on **Apple M2 Pro / macOS**
 
 Decomposing 50 independent series at once. rust-stats parallelises over
 columns with rayon (`arrow_compat::*_batch`, `arrow` feature enabled);
+`loess_batch` (degree 0/1) additionally runs through a `pulp`-dispatched
+cross-column SIMD kernel — one source compiles to scalar, NEON, AVX2,
+and AVX-512 paths and `Arch::new()` picks the right one at runtime.
 statsmodels has no native batched form, so the Python column is a
 straight Python loop over the same 50 series.
 
 | Operation | Size | rust-stats `*_batch` | statsmodels loop | Speedup |
 | --- | --- | ---: | ---: | ---: |
-| `stl_batch`                | 50 × n=720,   period=12 |   5.6 ms |    77.8 ms |  14× |
-| `stl_batch`                | 50 × n=1 000, period=12 |   7.6 ms |   108.1 ms |  14× |
-| `stl_batch`                | 50 × n=2 880, period=24 |  30.0 ms |   586.0 ms |  20× |
-| `seasonal_decompose_batch` | 50 × n=720,   period=12 |   0.17 ms |    5.98 ms |  35× |
-| `seasonal_decompose_batch` | 50 × n=1 000, period=12 |   0.16 ms |    5.91 ms |  37× |
-| `seasonal_decompose_batch` | 50 × n=2 880, period=24 |   0.40 ms |   10.9 ms |  27× |
-| `loess_batch`              | 50 × n=1 000, span=0.3  |  13.6 ms |   385.4 ms |  28× |
-| `loess_batch`              | 50 × n=5 000, span=0.3  | 329.2 ms |  4041.9 ms |  12× |
+| `stl_batch`                | 50 × n=720,   period=12 |   5.8 ms |    77.8 ms |   13× |
+| `stl_batch`                | 50 × n=1 000, period=12 |   7.9 ms |   108.1 ms |   14× |
+| `stl_batch`                | 50 × n=2 880, period=24 |  30.7 ms |   586.0 ms |   19× |
+| `seasonal_decompose_batch` | 50 × n=720,   period=12 |   0.19 ms |    5.98 ms |   31× |
+| `seasonal_decompose_batch` | 50 × n=1 000, period=12 |   0.21 ms |    5.91 ms |   28× |
+| `seasonal_decompose_batch` | 50 × n=2 880, period=24 |   0.46 ms |   10.9 ms |   24× |
+| `loess_batch` (SIMD+rayon) | 50 × n=1 000, span=0.3  |   2.2 ms |   385.4 ms |  **175×** |
+| `loess_batch` (SIMD+rayon) | 50 × n=5 000, span=0.3  |  48.8 ms |  4041.9 ms |  **83×** |
 
 Reproduce with:
 
