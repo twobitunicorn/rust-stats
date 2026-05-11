@@ -9,7 +9,7 @@
 //!
 //!   cargo run --release --example box_cox_workflow
 
-use rust_stats::{arima, box_cox, inv_box_cox, ArimaOpts, Lambda};
+use rust_stats::{arima, box_cox, ArimaOpts, BoxCox, Lambda};
 
 fn main() {
     // ── 1. Build a monthly series with multiplicative variance. ─────
@@ -52,11 +52,13 @@ fn main() {
     println!("  Pearson r = {:.3}   (marginal Gaussianity, rank-based)", pearson.lambda);
 
     // For a forecasting workflow on a seasonal series, prefer Guerrero.
-    // `guerrero.transformed` is already the Box-Cox-transformed series,
-    // and `guerrero.lambda` is the λ we'll need to invert later.
-    let z = guerrero.transformed;
-    let lambda = guerrero.lambda;
-    println!("\nUsing Guerrero λ = {:.3} for the SARIMA fit.", lambda);
+    // The `BoxCox` struct path encapsulates the chosen λ so we can
+    // forward-transform once and invert later without threading the
+    // value through every call site.
+    let bc = BoxCox::fit(&y, Lambda::Guerrero { period: m }).unwrap();
+    println!("\nUsing Guerrero λ = {:.3} for the SARIMA fit.", bc.lambda());
+
+    let z = bc.transform(&y).unwrap();
 
     // ── 3. Fit SARIMA on the transformed series. ────────────────────
     //    For an automated search, swap in:
@@ -72,14 +74,14 @@ fn main() {
     let f = fit.forecast_with_intervals(horizon, 0.05);
 
     // ── 5. Back-transform the mean and the interval bounds. ─────────
-    //    inv_box_cox is monotonic, so transforming the lower / upper
-    //    quantiles individually gives correctly-calibrated bounds on
-    //    the original scale. They will be asymmetric around the
-    //    back-transformed mean — that's the right thing (Box-Cox
-    //    stretches one tail).
-    let mean = inv_box_cox(&f.mean, lambda).unwrap();
-    let lower = inv_box_cox(&f.lower, lambda).unwrap();
-    let upper = inv_box_cox(&f.upper, lambda).unwrap();
+    //    BoxCox::inverse_transform is monotonic, so transforming the
+    //    lower / upper quantiles individually gives correctly-
+    //    calibrated bounds on the original scale. They will be
+    //    asymmetric around the back-transformed mean — that's the right
+    //    thing (Box-Cox stretches one tail).
+    let mean = bc.inverse_transform(&f.mean).unwrap();
+    let lower = bc.inverse_transform(&f.lower).unwrap();
+    let upper = bc.inverse_transform(&f.upper).unwrap();
 
     println!("\nForecast (original scale, 95% prediction intervals):");
     println!("  h     mean          [    lower,    upper ]");
@@ -91,8 +93,13 @@ fn main() {
     }
 
     // ── 6. Sanity: forward / inverse should round-trip the input. ───
-    let again = box_cox(&y, lambda).unwrap();
-    let y_back = inv_box_cox(&again.transformed, again.lambda).unwrap();
+    //    Two ways to do the same thing:
+    //
+    //    let out = box_cox(&y, bc.lambda())?;            // one-shot
+    //    let y_back = inv_box_cox(&out.transformed, …);
+    //
+    //    let y_back = bc.inverse_transform(&bc.transform(&y)?)?;  // struct path
+    let y_back = bc.inverse_transform(&bc.transform(&y).unwrap()).unwrap();
     let max_err = y
         .iter()
         .zip(&y_back)

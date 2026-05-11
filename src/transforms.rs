@@ -134,6 +134,66 @@ pub struct BoxCoxOutput {
     pub lambda: f64,
 }
 
+/// A Box-Cox transformer that owns its λ.
+///
+/// Use when you need to apply the *same* transform to multiple series
+/// (train/test split, multiple sub-cohorts, etc.) or thread the
+/// forward/inverse pair through a forecasting pipeline. For one-shot
+/// "transform this single series" use the free [`box_cox`] function
+/// instead — it's a thin wrapper around `BoxCox::fit` + `transform`.
+///
+/// ```ignore
+/// // Auto-estimate λ from training data, then apply to test data:
+/// let bc = BoxCox::fit(&y_train, Lambda::Guerrero { period: 12 })?;
+/// let z_train = bc.transform(&y_train)?;
+/// let z_test  = bc.transform(&y_test)?;
+/// // …model on z_train, forecast z_hat…
+/// let y_hat = bc.inverse_transform(&z_hat)?;
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub struct BoxCox {
+    lambda: f64,
+}
+
+impl BoxCox {
+    /// Construct from a known λ. No data required.
+    #[inline]
+    pub fn new(lambda: f64) -> Self {
+        Self { lambda }
+    }
+
+    /// Fit a `BoxCox` to `y` using the supplied [`Lambda`] (or a fixed
+    /// numeric λ via `From<f64>`). For `Lambda::Fixed(v)` this is
+    /// equivalent to [`BoxCox::new(v)`] and doesn't actually look at the
+    /// data; for the estimator variants (`Mle`, `Pearsonr`, `Guerrero`)
+    /// `y` is consumed to recover λ.
+    pub fn fit(y: &[f64], lambda: impl Into<Lambda>) -> Result<Self, BoxCoxError> {
+        let lmbda = match lambda.into() {
+            Lambda::Fixed(v) => v,
+            Lambda::Mle => lambda_mle(y)?,
+            Lambda::Pearsonr => lambda_pearsonr(y)?,
+            Lambda::Guerrero { period } => lambda_guerrero(y, period)?,
+        };
+        Ok(Self { lambda: lmbda })
+    }
+
+    /// The fitted λ.
+    #[inline]
+    pub fn lambda(&self) -> f64 {
+        self.lambda
+    }
+
+    /// Apply the forward transform with the stored λ.
+    pub fn transform(&self, y: &[f64]) -> Result<Vec<f64>, BoxCoxError> {
+        box_cox_apply(y, self.lambda)
+    }
+
+    /// Invert the transform with the stored λ.
+    pub fn inverse_transform(&self, y: &[f64]) -> Result<Vec<f64>, BoxCoxError> {
+        inv_box_cox(y, self.lambda)
+    }
+}
+
 /// Maximum-likelihood λ under the Gaussian transformed-series model
 /// (the `scipy.stats.boxcox` objective):
 ///
@@ -439,16 +499,11 @@ fn golden_section_minimize<F: Fn(f64) -> f64>(
 /// propagation purposes but never satisfies the positivity check on
 /// its own (only finite values gate the check).
 pub fn box_cox(y: &[f64], lambda: impl Into<Lambda>) -> Result<BoxCoxOutput, BoxCoxError> {
-    let lmbda = match lambda.into() {
-        Lambda::Fixed(v) => v,
-        Lambda::Mle => lambda_mle(y)?,
-        Lambda::Pearsonr => lambda_pearsonr(y)?,
-        Lambda::Guerrero { period } => lambda_guerrero(y, period)?,
-    };
-    let transformed = box_cox_apply(y, lmbda)?;
+    let bc = BoxCox::fit(y, lambda)?;
+    let transformed = bc.transform(y)?;
     Ok(BoxCoxOutput {
         transformed,
-        lambda: lmbda,
+        lambda: bc.lambda(),
     })
 }
 
@@ -976,6 +1031,74 @@ mod tests {
         let y = vec![1.0; 100];
         let err = box_cox(&y, Lambda::Guerrero { period: 1 }).unwrap_err();
         assert!(matches!(err, BoxCoxError::InvalidPeriod(1)));
+    }
+
+    // --- BoxCox struct ---
+
+    #[test]
+    fn boxcox_new_stores_lambda() {
+        let bc = BoxCox::new(0.5);
+        assert_eq!(bc.lambda(), 0.5);
+    }
+
+    #[test]
+    fn boxcox_fit_with_fixed_lambda_doesnt_touch_data() {
+        // Even on an empty slice, Lambda::Fixed should succeed.
+        let bc = BoxCox::fit(&[], 0.7).unwrap();
+        assert_eq!(bc.lambda(), 0.7);
+    }
+
+    #[test]
+    fn boxcox_fit_runs_estimator_on_data() {
+        // Lognormal data → MLE should pick λ near 0.
+        let y: Vec<f64> = (0..200)
+            .map(|i| {
+                let t = (i as f64) * 0.31;
+                (t.sin() + (t * 1.7).cos() * 0.5).exp() * 10.0
+            })
+            .collect();
+        let bc = BoxCox::fit(&y, Lambda::Mle).unwrap();
+        assert!(bc.lambda().abs() < 0.5, "got λ = {}", bc.lambda());
+    }
+
+    #[test]
+    fn boxcox_transform_inverse_roundtrips() {
+        let y = vec![1.0, 2.0, 4.0, 8.0, 16.0];
+        let bc = BoxCox::new(0.5);
+        let z = bc.transform(&y).unwrap();
+        let back = bc.inverse_transform(&z).unwrap();
+        for (a, b) in y.iter().zip(back.iter()) {
+            assert_relative_eq!(a, b, max_relative = 1e-12);
+        }
+    }
+
+    #[test]
+    fn boxcox_transform_matches_free_function() {
+        // The struct path and the one-shot free function must produce
+        // bit-identical transforms for the same λ.
+        let y = vec![1.5, 2.5, 4.0, 8.5];
+        let from_struct = BoxCox::new(0.75).transform(&y).unwrap();
+        let from_free = box_cox(&y, 0.75).unwrap().transformed;
+        for (a, b) in from_struct.iter().zip(from_free.iter()) {
+            assert_eq!(a, b);
+        }
+    }
+
+    #[test]
+    fn boxcox_applies_to_multiple_series_with_same_lambda() {
+        // The motivating use case: fit λ once, apply to several series.
+        let y_train: Vec<f64> = (1..=50).map(|i| (i as f64).sqrt() * 5.0 + 10.0).collect();
+        let y_test: Vec<f64> = (51..=60).map(|i| (i as f64).sqrt() * 5.0 + 10.0).collect();
+        let bc = BoxCox::fit(&y_train, Lambda::Mle).unwrap();
+        let z_train = bc.transform(&y_train).unwrap();
+        let z_test = bc.transform(&y_test).unwrap();
+        assert_eq!(z_train.len(), y_train.len());
+        assert_eq!(z_test.len(), y_test.len());
+        // Both calls used the same λ; the inverse on either round-trips.
+        let back = bc.inverse_transform(&z_test).unwrap();
+        for (a, b) in y_test.iter().zip(back.iter()) {
+            assert_relative_eq!(a, b, max_relative = 1e-10);
+        }
     }
 
     #[test]
