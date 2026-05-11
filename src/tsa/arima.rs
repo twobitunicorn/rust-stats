@@ -235,6 +235,19 @@ pub fn arima(y: &[f64], opts: ArimaOpts) -> Result<ArimaFit, ArimaError> {
     })
 }
 
+/// Forecast result including pointwise prediction intervals.
+#[derive(Debug, Clone)]
+pub struct ForecastResult {
+    /// Point forecasts (length = `steps`).
+    pub mean: Vec<f64>,
+    /// Forecast-error variance per horizon (length = `steps`).
+    pub variance: Vec<f64>,
+    /// Lower bound of the (1 − α) prediction interval per horizon.
+    pub lower: Vec<f64>,
+    /// Upper bound of the (1 − α) prediction interval per horizon.
+    pub upper: Vec<f64>,
+}
+
 impl ArimaFit {
     /// Multi-step-ahead point forecasts on the *original* scale.
     ///
@@ -282,6 +295,138 @@ impl ArimaFit {
         // Re-add intercept and integrate back to the original scale.
         let w_forecasts: Vec<f64> = w_forecasts.iter().map(|v| v + self.intercept).collect();
         integrate_from_last(&w_forecasts, &self.last_obs, d)
+    }
+
+    /// Multi-step forecasts with Gaussian prediction intervals.
+    ///
+    /// `alpha` is the tail mass (so 0.05 ↦ 95% intervals). The variance
+    /// at horizon `h` is `σ² · Σ_{j=0}^{h−1} (ψ*_j)²`, where the
+    /// `ψ*` weights come from the infinite-MA representation of the
+    /// (possibly differenced) process; for `d > 0` they are
+    /// cumulatively-integrated `d` times.
+    ///
+    /// Intervals assume Gaussian innovations and treat the fitted
+    /// parameters as known (i.e., they capture innovation uncertainty
+    /// but not parameter uncertainty — same convention as R `predict.Arima`
+    /// and statsmodels' default).
+    pub fn forecast_with_intervals(&self, steps: usize, alpha: f64) -> ForecastResult {
+        let mean = self.forecast(steps);
+        let z = inv_phi(1.0 - alpha / 2.0);
+
+        // ψ-weights of the stationary ARMA component (length = steps,
+        // ψ_0 = 1).
+        let psi = psi_weights(&self.phi, &self.theta, steps);
+        // For ARIMA with d > 0, integrate ψ d times to get ψ*.
+        let d = self.opts.d as usize;
+        let psi_star = integrate_psi(&psi, d);
+
+        // Var(h) = σ² · Σ_{j=0}^{h-1} ψ*_j².
+        let mut variance = Vec::with_capacity(steps);
+        let mut running = 0.0f64;
+        for h in 0..steps {
+            running += psi_star[h] * psi_star[h];
+            variance.push(self.sigma2 * running);
+        }
+        let lower: Vec<f64> = mean
+            .iter()
+            .zip(&variance)
+            .map(|(m, v)| m - z * v.sqrt())
+            .collect();
+        let upper: Vec<f64> = mean
+            .iter()
+            .zip(&variance)
+            .map(|(m, v)| m + z * v.sqrt())
+            .collect();
+
+        ForecastResult { mean, variance, lower, upper }
+    }
+}
+
+// ----------------------------------------------------------------------
+// ψ-weights and inverse normal CDF for prediction intervals
+// ----------------------------------------------------------------------
+
+/// Infinite-MA representation: ψ_0 = 1; ψ_k = θ_k + Σ_{j=1..min(k,p)} φ_j ψ_{k-j},
+/// with θ_k = 0 for k > q. Length = `len`.
+fn psi_weights(phi: &[f64], theta: &[f64], len: usize) -> Vec<f64> {
+    let p = phi.len();
+    let q = theta.len();
+    let mut psi = vec![0.0f64; len.max(1)];
+    psi[0] = 1.0;
+    for k in 1..len {
+        let mut v = if k <= q { theta[k - 1] } else { 0.0 };
+        let lim = p.min(k);
+        for j in 1..=lim {
+            v += phi[j - 1] * psi[k - j];
+        }
+        psi[k] = v;
+    }
+    psi
+}
+
+/// Cumulatively integrate `psi` `d` times — turns the stationary
+/// representation into the non-stationary one for ARIMA(p, d, q).
+fn integrate_psi(psi: &[f64], d: usize) -> Vec<f64> {
+    if d == 0 {
+        return psi.to_vec();
+    }
+    let mut cur: Vec<f64> = psi.to_vec();
+    for _ in 0..d {
+        let mut running = 0.0f64;
+        for v in cur.iter_mut() {
+            running += *v;
+            *v = running;
+        }
+    }
+    cur
+}
+
+/// Inverse standard normal CDF, Acklam's algorithm (accuracy ≈ 1.15e-9).
+fn inv_phi(p: f64) -> f64 {
+    const A: [f64; 6] = [
+        -3.969683028665376e+01,
+        2.209460984245205e+02,
+        -2.759285104469687e+02,
+        1.383577518672690e+02,
+        -3.066479806614716e+01,
+        2.506628277459239e+00,
+    ];
+    const B: [f64; 5] = [
+        -5.447609879822406e+01,
+        1.615858368580409e+02,
+        -1.556989798598866e+02,
+        6.680131188771972e+01,
+        -1.328068155288572e+01,
+    ];
+    const C: [f64; 6] = [
+        -7.784894002430293e-03,
+        -3.223964580411365e-01,
+        -2.400758277161838e+00,
+        -2.549732539343734e+00,
+        4.374664141464968e+00,
+        2.938163982698783e+00,
+    ];
+    const D: [f64; 4] = [
+        7.784695709041462e-03,
+        3.224671290700398e-01,
+        2.445134137142996e+00,
+        3.754408661907416e+00,
+    ];
+    let p_low = 0.02425;
+    let p_high = 1.0 - p_low;
+    if p < p_low {
+        let q = (-2.0 * p.ln()).sqrt();
+        (((((C[0] * q + C[1]) * q + C[2]) * q + C[3]) * q + C[4]) * q + C[5])
+            / ((((D[0] * q + D[1]) * q + D[2]) * q + D[3]) * q + 1.0)
+    } else if p <= p_high {
+        let q = p - 0.5;
+        let r = q * q;
+        (((((A[0] * r + A[1]) * r + A[2]) * r + A[3]) * r + A[4]) * r + A[5]) * q
+            / (((((B[0] * r + B[1]) * r + B[2]) * r + B[3]) * r + B[4]) * r + 1.0)
+    } else {
+        let q = (-2.0 * (1.0 - p).ln()).sqrt();
+        -(((((C[0] * q + C[1]) * q + C[2]) * q + C[3]) * q + C[4]) * q + C[5])
+            / ((((D[0] * q + D[1]) * q + D[2]) * q + D[3]) * q + 1.0)
     }
 }
 

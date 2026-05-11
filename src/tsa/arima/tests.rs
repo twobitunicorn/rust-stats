@@ -247,6 +247,107 @@ fn rejects_non_finite() {
     assert_eq!(err, ArimaError::NonFinite);
 }
 
+// ----------------------------------------------------------------------
+// Prediction intervals
+// ----------------------------------------------------------------------
+
+#[test]
+fn psi_weights_ar1_match_geometric_decay() {
+    // For AR(1) with no MA, ψ_k = φ^k.
+    let psi = super::psi_weights(&[0.6], &[], 6);
+    let expected = [1.0, 0.6, 0.36, 0.216, 0.1296, 0.07776];
+    for (a, e) in psi.iter().zip(expected.iter()) {
+        assert!((a - e).abs() < 1e-12, "psi: {a} vs {e}");
+    }
+}
+
+#[test]
+fn psi_weights_ma1_truncate_after_q() {
+    // For MA(1), ψ_0 = 1, ψ_1 = θ, ψ_k = 0 for k > 1.
+    let psi = super::psi_weights(&[], &[0.4], 5);
+    assert!((psi[0] - 1.0).abs() < 1e-12);
+    assert!((psi[1] - 0.4).abs() < 1e-12);
+    for v in psi.iter().skip(2) {
+        assert!(v.abs() < 1e-12, "expected 0, got {v}");
+    }
+}
+
+#[test]
+fn integrate_psi_d1_is_cumsum() {
+    let psi = vec![1.0, 0.5, 0.25];
+    let starred = super::integrate_psi(&psi, 1);
+    assert_eq!(starred, vec![1.0, 1.5, 1.75]);
+}
+
+#[test]
+fn integrate_psi_d2() {
+    let psi = vec![1.0, 0.5, 0.25];
+    // After d=1: [1.0, 1.5, 1.75]
+    // After d=2: [1.0, 2.5, 4.25]
+    let starred = super::integrate_psi(&psi, 2);
+    assert_eq!(starred, vec![1.0, 2.5, 4.25]);
+}
+
+#[test]
+fn inv_phi_known_quantiles() {
+    // Standard reference values.
+    assert!((super::inv_phi(0.975) - 1.959963984540054).abs() < 1e-7);
+    assert!((super::inv_phi(0.95) - 1.6448536269514722).abs() < 1e-7);
+    assert!((super::inv_phi(0.5) - 0.0).abs() < 1e-9);
+    assert!((super::inv_phi(0.025) - (-1.959963984540054)).abs() < 1e-7);
+}
+
+#[test]
+fn forecast_intervals_have_correct_shape() {
+    let y = simulate_arma(500, &[0.5], &[], 1.0, 0xF4);
+    let fit = arima(&y, ArimaOpts::new(1, 0, 0)).unwrap();
+    let r = fit.forecast_with_intervals(8, 0.05);
+    assert_eq!(r.mean.len(), 8);
+    assert_eq!(r.variance.len(), 8);
+    assert_eq!(r.lower.len(), 8);
+    assert_eq!(r.upper.len(), 8);
+    // Variance is monotone non-decreasing in horizon.
+    for h in 1..8 {
+        assert!(
+            r.variance[h] >= r.variance[h - 1] - 1e-12,
+            "var[{h}] = {} < var[{}]={}",
+            r.variance[h],
+            h - 1,
+            r.variance[h - 1],
+        );
+    }
+    // Intervals bracket the mean.
+    for h in 0..8 {
+        assert!(r.lower[h] <= r.mean[h], "lower > mean at h={h}");
+        assert!(r.upper[h] >= r.mean[h], "upper < mean at h={h}");
+    }
+}
+
+#[test]
+fn forecast_intervals_widen_for_arima_d1() {
+    // ARIMA(0, 1, 0) — random walk — forecast variance grows linearly
+    // in h (variance at horizon h = σ² · h).
+    let mut rng = Rng::new(0xF5);
+    let mut y = vec![0.0];
+    for _ in 1..500 {
+        let last = *y.last().unwrap();
+        y.push(last + rng.normal());
+    }
+    let mut opts = ArimaOpts::new(0, 1, 0);
+    opts.include_constant = false;
+    let fit = arima(&y, opts).unwrap();
+    let r = fit.forecast_with_intervals(10, 0.05);
+    // var[h] should be ≈ sigma2 · (h+1).
+    for h in 0..10 {
+        let expected = fit.sigma2 * (h + 1) as f64;
+        let got = r.variance[h];
+        assert!(
+            (got - expected).abs() / expected < 1e-9,
+            "h={h}: var={got} vs expected {expected}",
+        );
+    }
+}
+
 #[test]
 fn aic_bic_finite() {
     let y = simulate_arma(500, &[0.5], &[0.2], 1.0, 0xC1);
