@@ -1,0 +1,130 @@
+//! Apache Arrow adapters for rust-stats. Enabled with the `arrow` feature.
+//!
+//! Thin wrappers that unpack `Float64Array` / `RecordBatch` into the
+//! borrowed-slice and `Matrix<f64>` forms the core API uses, then
+//! repackage the outputs as Arrow. The point is interop with Polars,
+//! DataFusion, DuckDB, PyArrow, and Parquet — not a performance win.
+//!
+//! Null policy: any null in an input array returns `ArrowError::HasNulls`.
+//! Use `arrow::compute::filter` or Polars' `drop_nulls` upstream if you
+//! want statsmodels-style `missing='drop'` semantics.
+
+use std::sync::Arc;
+
+use arrow::array::{Array, ArrayRef, Float64Array, RecordBatch};
+use arrow::datatypes::{DataType, Field, Schema};
+
+use crate::error::{LoessError, OlsError, SeasonalDecomposeError, StlError};
+use crate::smoothing::loess as loess_core;
+use crate::tsa::{
+    seasonal_decompose as sd_core, stl as stl_core, Decomposition,
+    SeasonalDecomposeOpts, StlOpts,
+};
+use crate::{Matrix, Ols, OlsResults};
+
+#[derive(Debug, thiserror::Error)]
+pub enum ArrowError {
+    #[error("column '{col}' has {nulls} nulls; rust-stats requires non-null inputs")]
+    HasNulls { col: String, nulls: usize },
+    #[error("column '{col}' has type {got}; expected Float64")]
+    WrongType { col: String, got: DataType },
+    #[error("y length {ny} does not match x rows {nx}")]
+    LengthMismatch { ny: usize, nx: usize },
+    #[error(transparent)]
+    Ols(#[from] OlsError),
+    #[error(transparent)]
+    Loess(#[from] LoessError),
+    #[error(transparent)]
+    Stl(#[from] StlError),
+    #[error(transparent)]
+    SeasonalDecompose(#[from] SeasonalDecomposeError),
+}
+
+fn as_slice<'a>(arr: &'a Float64Array, name: &str) -> Result<&'a [f64], ArrowError> {
+    if arr.null_count() > 0 {
+        return Err(ArrowError::HasNulls {
+            col: name.into(),
+            nulls: arr.null_count(),
+        });
+    }
+    Ok(arr.values())
+}
+
+fn float_col<'a>(batch: &'a RecordBatch, j: usize) -> Result<&'a Float64Array, ArrowError> {
+    let field = batch.schema().field(j).clone();
+    let arr = batch.column(j);
+    arr.as_any()
+        .downcast_ref::<Float64Array>()
+        .ok_or(ArrowError::WrongType {
+            col: field.name().clone(),
+            got: arr.data_type().clone(),
+        })
+}
+
+/// Pack a RecordBatch of Float64 columns into a column-major `Matrix<f64>`.
+fn batch_to_matrix(batch: &RecordBatch) -> Result<Matrix<f64>, ArrowError> {
+    let n = batch.num_rows();
+    let p = batch.num_columns();
+    let mut cols: Vec<&[f64]> = Vec::with_capacity(p);
+    for j in 0..p {
+        let arr = float_col(batch, j)?;
+        cols.push(as_slice(arr, batch.schema().field(j).name())?);
+    }
+    Ok(Matrix::from_fn(n, p, |i, j| cols[j][i]))
+}
+
+/// Fit OLS where `x` is a `RecordBatch` of `Float64` feature columns. An
+/// intercept is auto-prepended; coefficient names become `["(Intercept)",
+/// <field-names>...]`.
+pub fn fit_ols(y: &Float64Array, x: &RecordBatch) -> Result<OlsResults, ArrowError> {
+    if y.len() != x.num_rows() {
+        return Err(ArrowError::LengthMismatch {
+            ny: y.len(),
+            nx: x.num_rows(),
+        });
+    }
+    let y_slice = as_slice(y, "y")?;
+    let x_mat = batch_to_matrix(x)?;
+    let mut names: Vec<String> = Vec::with_capacity(x.num_columns() + 1);
+    names.push("(Intercept)".to_string());
+    for f in x.schema().fields() {
+        names.push(f.name().clone());
+    }
+    Ok(Ols::new(y_slice, x_mat.as_ref()).fit()?.with_names(names))
+}
+
+/// LOESS on an Arrow `Float64Array`. Output array length equals input length.
+pub fn loess(y: &Float64Array, span: f64, degree: u8) -> Result<Float64Array, ArrowError> {
+    let out = loess_core(as_slice(y, "y")?, span, degree)?;
+    Ok(Float64Array::from(out))
+}
+
+fn decomposition_to_batch(d: Decomposition) -> RecordBatch {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("trend",    DataType::Float64, true),
+        Field::new("seasonal", DataType::Float64, true),
+        Field::new("residual", DataType::Float64, true),
+    ]));
+    let cols: Vec<ArrayRef> = vec![
+        Arc::new(Float64Array::from(d.trend)),
+        Arc::new(Float64Array::from(d.seasonal)),
+        Arc::new(Float64Array::from(d.residual)),
+    ];
+    RecordBatch::try_new(schema, cols).expect("schema/columns match by construction")
+}
+
+/// Cleveland 1990 STL on an Arrow series. Returns a `RecordBatch` with
+/// `trend`, `seasonal`, `residual` columns.
+pub fn stl(y: &Float64Array, opts: StlOpts) -> Result<RecordBatch, ArrowError> {
+    Ok(decomposition_to_batch(stl_core(as_slice(y, "y")?, opts)?))
+}
+
+/// Classical seasonal_decompose on an Arrow series. Returns a `RecordBatch`
+/// with `trend`, `seasonal`, `residual` columns; the first/last `period/2`
+/// rows of `trend`/`residual` are NaN (encoded as Arrow NaN, not nulls).
+pub fn seasonal_decompose(
+    y: &Float64Array,
+    opts: SeasonalDecomposeOpts,
+) -> Result<RecordBatch, ArrowError> {
+    Ok(decomposition_to_batch(sd_core(as_slice(y, "y")?, opts)?))
+}

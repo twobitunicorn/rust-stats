@@ -11,6 +11,11 @@ statrs = "0.18"
 thiserror = "2"
 once_cell = "1"
 rayon = "1.10"
+arrow = { version = "58", optional = true, default-features = false }
+
+[features]
+default = []
+arrow = ["dep:arrow"]
 
 [dev-dependencies]
 serde = { version = "1", features = ["derive"] }

@@ -28,6 +28,37 @@ println!("HC3 std errors = {:?}", inf.std_err);
   multiplicative.
 - **seasonal_decompose** — classical centered moving-average decomposition,
   additive and multiplicative, matching statsmodels exactly.
+- **Apache Arrow interop** (optional, `arrow` feature) — thin adapters so
+  the same routines accept `Float64Array` / `RecordBatch` and return
+  Arrow outputs. Enables direct Polars / DataFusion / DuckDB integration.
+
+## Apache Arrow interop
+
+Enable the `arrow` feature:
+
+```toml
+rust-stats = { version = "...", features = ["arrow"] }
+```
+
+```rust
+use rust_stats::arrow_compat;
+use rust_stats::StlOpts;
+
+let res = arrow_compat::fit_ols(&y_arr, &design_batch)?;
+println!("{}", res.summary());              // field names flow into the summary
+
+let smoothed = arrow_compat::loess(&series, 0.3, 1)?;
+let decomp   = arrow_compat::stl(&series, StlOpts::new(12))?;
+// decomp is a RecordBatch with `trend | seasonal | residual` columns —
+// drop straight into Polars, DataFusion, or DuckDB.
+```
+
+Inputs must be `Float64`; any null returns `ArrowError::HasNulls` rather
+than silently substituting. Use `arrow::compute::filter` or Polars'
+`drop_nulls` upstream for statsmodels-style `missing='drop'` semantics.
+
+The feature is off by default; users without it see zero impact on
+compile time, binary size, or dependency graph.
 
 ## statsmodels parity
 

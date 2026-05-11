@@ -14,6 +14,9 @@ pub mod regression;
 pub mod smoothing;
 pub mod tsa;
 
+#[cfg(feature = "arrow")]
+pub mod arrow_compat;
+
 // Re-export the matrix types so downstream crates don't need a direct
 // faer dep just to call us.
 pub use faer::{Mat as Matrix, MatRef as Block, MatRef as SubMatrix};
