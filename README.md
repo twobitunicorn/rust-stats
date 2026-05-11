@@ -95,20 +95,24 @@ independent of statsmodels.
 Wall-clock per call, median of warmed runs, on **Apple M2 Pro / macOS**
 (rustc 1.95, statsmodels 0.14.6, numpy 2.4.4, scipy 1.17.1).
 
-| Operation | Size | rust-stats | statsmodels | Speedup |
+R is `stats::stl()` / `lowess()` / `decompose()` with the jump/delta
+approximations disabled (`s.jump = t.jump = l.jump = 1`, `delta = 0`)
+so we're comparing per-point fits in both directions.
+
+| Operation | Size | rust-stats | statsmodels | R 4.6 |
 | --- | --- | ---: | ---: | ---: |
-| LOESS (deg=1, span=0.3)   | n=100              | 0.033 ms | 0.576 ms |  17×   |
-| LOESS (deg=1, span=0.3)   | n=1 000            | 0.460 ms | 7.859 ms |  17×   |
-| LOESS (deg=1, span=0.3)   | n=5 000            | 7.146 ms | 80.711 ms| 11×   |
-| STL                       | n=144,  period=12  | 0.175 ms | 0.323 ms |   1.8× |
-| STL                       | n=720,  period=12  | 0.696 ms | 1.570 ms |   2.3× |
-| STL                       | n=2 880, period=24 | 1.702 ms | 11.547 ms |  6.8× |
-| seasonal_decompose (+)    | n=144,  period=12  | 0.001 ms | 0.115 ms | 115×   |
-| seasonal_decompose (+)    | n=720,  period=12  | 0.004 ms | 0.120 ms |  30×   |
-| seasonal_decompose (+)    | n=2 880, period=24 | 0.023 ms | 0.218 ms |   9.5× |
-| seasonal_decompose (×)    | n=144,  period=12  | 0.001 ms | 0.120 ms | 120×   |
-| seasonal_decompose (×)    | n=720,  period=12  | 0.004 ms | 0.125 ms |  31×   |
-| seasonal_decompose (×)    | n=2 880, period=24 | 0.024 ms | 0.230 ms |   9.6× |
+| LOESS (deg=1, span=0.3)   | n=100              | 0.033 ms | 0.576 ms |    0.021 ms |
+| LOESS (deg=1, span=0.3)   | n=1 000            | 0.460 ms | 7.859 ms |    1.631 ms |
+| LOESS (deg=1, span=0.3)   | n=5 000            | 7.146 ms | 80.711 ms|   40.174 ms |
+| STL                       | n=144,  period=12  | 0.175 ms | 0.323 ms |    0.106 ms |
+| STL                       | n=720,  period=12  | 0.696 ms | 1.570 ms |    0.349 ms |
+| STL                       | n=2 880, period=24 | 1.702 ms | 11.547 ms |   2.385 ms |
+| seasonal_decompose (+)    | n=144,  period=12  | 0.001 ms | 0.115 ms |    0.545 ms |
+| seasonal_decompose (+)    | n=720,  period=12  | 0.004 ms | 0.120 ms |    0.661 ms |
+| seasonal_decompose (+)    | n=2 880, period=24 | 0.023 ms | 0.218 ms |    1.294 ms |
+| seasonal_decompose (×)    | n=144,  period=12  | 0.001 ms | 0.120 ms |    0.539 ms |
+| seasonal_decompose (×)    | n=720,  period=12  | 0.004 ms | 0.125 ms |    0.664 ms |
+| seasonal_decompose (×)    | n=2 880, period=24 | 0.024 ms | 0.230 ms |    1.173 ms |
 
 ### Batched (50 series per call)
 
@@ -120,16 +124,16 @@ and AVX-512 paths and `Arch::new()` picks the right one at runtime.
 statsmodels has no native batched form, so the Python column is a
 straight Python loop over the same 50 series.
 
-| Operation | Size | rust-stats `*_batch` | statsmodels loop | Speedup |
+| Operation | Size | rust-stats `*_batch` | statsmodels loop | R loop |
 | --- | --- | ---: | ---: | ---: |
-| `stl_batch`                | 50 × n=720,   period=12 |   5.8 ms |    77.8 ms |   13× |
-| `stl_batch`                | 50 × n=1 000, period=12 |   7.9 ms |   108.1 ms |   14× |
-| `stl_batch`                | 50 × n=2 880, period=24 |  30.7 ms |   586.0 ms |   19× |
-| `seasonal_decompose_batch` | 50 × n=720,   period=12 |   0.19 ms |    5.98 ms |   31× |
-| `seasonal_decompose_batch` | 50 × n=1 000, period=12 |   0.21 ms |    5.91 ms |   28× |
-| `seasonal_decompose_batch` | 50 × n=2 880, period=24 |   0.46 ms |   10.9 ms |   24× |
-| `loess_batch` (SIMD+rayon) | 50 × n=1 000, span=0.3  |   2.2 ms |   385.4 ms |  **175×** |
-| `loess_batch` (SIMD+rayon) | 50 × n=5 000, span=0.3  |  48.8 ms |  4041.9 ms |  **83×** |
+| `stl_batch`                | 50 × n=720,   period=12 |   5.8 ms |    77.8 ms |    17.3 ms |
+| `stl_batch`                | 50 × n=1 000, period=12 |   7.9 ms |   108.1 ms |    24.3 ms |
+| `stl_batch`                | 50 × n=2 880, period=24 |  30.7 ms |   586.0 ms |   119.7 ms |
+| `seasonal_decompose_batch` | 50 × n=720,   period=12 |   0.19 ms |    5.98 ms |    35.2 ms |
+| `seasonal_decompose_batch` | 50 × n=1 000, period=12 |   0.21 ms |    5.91 ms |    37.8 ms |
+| `seasonal_decompose_batch` | 50 × n=2 880, period=24 |   0.46 ms |    10.9 ms |    56.3 ms |
+| `loess_batch` (SIMD+rayon) | 50 × n=1 000, span=0.3  |   2.2 ms |   385.4 ms |    80.7 ms |
+| `loess_batch` (SIMD+rayon) | 50 × n=5 000, span=0.3  |  48.8 ms |  4041.9 ms |  1971.1 ms |
 
 Reproduce with:
 
@@ -137,11 +141,21 @@ Reproduce with:
 cargo run --release --example bench                       # core benches
 cargo run --release --features arrow --example bench      # adds batched section
 python3 tests/golden/bench_statsmodels.py
+Rscript tests/golden/bench_r.R
 ```
 
 LOESS gains a parallel inner loop. `seasonal_decompose` is an O(n) routine
 where Python-side overhead dominates at small n. Batched variants add a
 second layer of parallelism (rayon over columns) for multi-series workloads.
+
+**vs R**: R's Fortran inner loops are extremely tight, so R beats us on
+small-n single-series (n ≤ ~500 for LOESS, n ≤ ~1500 for STL). Past that
+crossover, rust-stats' rayon parallelism amortizes its overhead and we
+overtake — sometimes by a lot at large n. R's `decompose()` has heavy
+R-side per-call overhead; we beat it by 50–550× across all sizes.
+On batched workloads R has no native form and we lead consistently
+(3–4× on `stl_batch`, ~40× on `loess_batch`, ~180× on
+`seasonal_decompose_batch`).
 
 ## License
 
