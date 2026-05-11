@@ -162,8 +162,9 @@ use polars::prelude::*;
 let y_series: Series = /* ... */;
 
 let smoothed: Series = polars_compat::loess(&y_series, 0.3, 1, Missing::Error)?;
-let decomp:   DataFrame = polars_compat::stl(&y_series, StlOpts::new(12))?;
-// decomp has columns `trend | seasonal | residual`.
+let decomp = polars_compat::stl(&y_series, StlOpts::new(12))?;
+// decomp.trend, decomp.seasonal, decomp.residual are each a Series of
+// length s.len() (PolarsDecomposition struct).
 ```
 
 Multi-series workloads use `loess_batch` / `stl_batch` /
@@ -178,9 +179,12 @@ let trends = polars_compat::stl_batch(&prices, StlOpts::new(252))?.trend;
 let smoothed = polars_compat::loess_batch(&prices, 0.3, 1, Missing::Error)?;
 ```
 
-`stl_batch` and `seasonal_decompose_batch` return a
-`PolarsDecompositionBatch` with three `DataFrame`s (`trend`, `seasonal`,
-`residual`), each sharing the input schema.
+`stl` and `seasonal_decompose` return a `PolarsDecomposition` with
+three `Series` fields (`trend`, `seasonal`, `residual`) of length
+`s.len()`. The batched variants `stl_batch` and
+`seasonal_decompose_batch` return a `PolarsDecompositionBatch` with
+three `DataFrame`s (`trend`, `seasonal`, `residual`), each sharing the
+input schema.
 
 Validation runs up front: input columns must be `Float64`. By default
 any Polars null returns `PolarsCompatError::HasNulls`. To linearly fill

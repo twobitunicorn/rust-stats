@@ -92,37 +92,45 @@ fn prepare_for_loess(s: &Series, missing: Missing) -> Result<Vec<f64>, PolarsCom
     }
 }
 
-/// Build a 3-column DataFrame {trend, seasonal, residual} from a
-/// `Decomposition`.
-fn decomp_to_df(d: crate::tsa::Decomposition) -> Result<DataFrame, PolarsCompatError> {
-    df![
-        "trend"    => d.trend,
-        "seasonal" => d.seasonal,
-        "residual" => d.residual,
-    ]
-    .map_err(PolarsCompatError::Polars)
+/// Output of a single-series seasonal-trend decomposition. Each
+/// component is a same-length `Series` named after its role — the
+/// caller can rename or assemble into a DataFrame via `df!` if needed.
+#[derive(Debug, Clone)]
+pub struct PolarsDecomposition {
+    pub trend:    Series,
+    pub seasonal: Series,
+    pub residual: Series,
 }
 
-/// Cleveland 1990 STL on a Polars `Series`. Returns a `DataFrame` with
-/// `trend`, `seasonal`, `residual` columns of length `s.len()`. Honours
-/// `opts.missing` — set to `Missing::Interpolate` to linearly fill
-/// Polars nulls before the decomposition (residual will be NaN at those
-/// positions on output).
-pub fn stl(s: &Series, opts: StlOpts) -> Result<DataFrame, PolarsCompatError> {
+fn decomp_to_struct(d: crate::tsa::Decomposition) -> PolarsDecomposition {
+    PolarsDecomposition {
+        trend:    Series::new("trend".into(),    d.trend),
+        seasonal: Series::new("seasonal".into(), d.seasonal),
+        residual: Series::new("residual".into(), d.residual),
+    }
+}
+
+/// Cleveland 1990 STL on a Polars `Series`. Returns a
+/// `PolarsDecomposition` whose three `Series` reconstruct `s`
+/// (additive: `trend + seasonal + residual`; multiplicative:
+/// `trend * seasonal * residual`). Honours `opts.missing` — set to
+/// `Missing::Interpolate` to linearly fill Polars nulls before the
+/// decomposition (residual will be NaN at those positions on output).
+pub fn stl(s: &Series, opts: StlOpts) -> Result<PolarsDecomposition, PolarsCompatError> {
     let v = series_to_vec(s, opts.missing)?;
-    Ok(decomp_to_df(core_stl(&v, opts)?)?)
+    Ok(decomp_to_struct(core_stl(&v, opts)?))
 }
 
 /// Classical seasonal_decompose on a Polars `Series`. Same output shape
-/// as `stl`, but `trend` and `residual` have nulls (NaN) at the
-/// first/last `period/2` positions where the centred MA can't be
-/// computed. Honours `opts.missing` the same way `stl` does.
+/// as `stl`, but `trend` and `residual` are `NaN` at the first/last
+/// `period/2` positions where the centred MA can't be computed.
+/// Honours `opts.missing` the same way `stl` does.
 pub fn seasonal_decompose(
     s: &Series,
     opts: SeasonalDecomposeOpts,
-) -> Result<DataFrame, PolarsCompatError> {
+) -> Result<PolarsDecomposition, PolarsCompatError> {
     let v = series_to_vec(s, opts.missing)?;
-    Ok(decomp_to_df(core_sd(&v, opts)?)?)
+    Ok(decomp_to_struct(core_sd(&v, opts)?))
 }
 
 // ── Batched (multi-column) adapters ─────────────────────────────────────

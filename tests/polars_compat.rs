@@ -31,6 +31,10 @@ fn float_col<'a>(df: &'a DataFrame, name: &str) -> &'a Float64Chunked {
     df.column(name).unwrap().f64().unwrap()
 }
 
+fn f64s(s: &Series) -> &Float64Chunked {
+    s.f64().unwrap()
+}
+
 // ── LOESS ───────────────────────────────────────────────────────────────
 
 #[test]
@@ -79,14 +83,15 @@ fn stl_returns_dataframe_with_expected_schema() {
         .collect();
     let series = Series::new("y".into(), y.clone());
 
-    let df = stl(&series, StlOpts::new(period)).unwrap();
-    assert_eq!(df.height(), n);
-    let names: Vec<&str> = df.columns().iter().map(|c| c.name().as_str()).collect();
-    assert_eq!(names, vec!["trend", "seasonal", "residual"]);
+    let d = stl(&series, StlOpts::new(period)).unwrap();
+    assert_eq!(d.trend.len(), n);
+    assert_eq!(d.trend.name().as_str(),    "trend");
+    assert_eq!(d.seasonal.name().as_str(), "seasonal");
+    assert_eq!(d.residual.name().as_str(), "residual");
 
-    let trend    = float_col(&df, "trend");
-    let seasonal = float_col(&df, "seasonal");
-    let residual = float_col(&df, "residual");
+    let trend    = f64s(&d.trend);
+    let seasonal = f64s(&d.seasonal);
+    let residual = f64s(&d.residual);
     for i in 0..n {
         let recon = trend.get(i).unwrap()
             + seasonal.get(i).unwrap()
@@ -107,11 +112,11 @@ fn seasonal_decompose_preserves_nan_edges() {
 
     let mut opts = SeasonalDecomposeOpts::new(period);
     opts.mode = DecomposeMode::Additive;
-    let df = seasonal_decompose(&series, opts).unwrap();
-    assert_eq!(df.height(), n);
+    let d = seasonal_decompose(&series, opts).unwrap();
+    assert_eq!(d.trend.len(), n);
 
-    let trend = float_col(&df, "trend");
-    let residual = float_col(&df, "residual");
+    let trend = f64s(&d.trend);
+    let residual = f64s(&d.residual);
     for i in 0..half {
         assert!(trend.get(i).unwrap().is_nan());
         assert!(residual.get(i).unwrap().is_nan());
@@ -233,10 +238,12 @@ fn batched_rejects_nulls_in_any_column() {
 
 #[test]
 fn module_surface() {
+    use rust_stats::polars_compat::PolarsDecomposition;
     let _: fn(&Series, f64, u8, Missing) -> Result<Series, PolarsCompatError> =
         polars_compat::loess;
-    let _: fn(&Series, StlOpts) -> Result<DataFrame, PolarsCompatError> = polars_compat::stl;
-    let _: fn(&Series, SeasonalDecomposeOpts) -> Result<DataFrame, PolarsCompatError> =
+    let _: fn(&Series, StlOpts) -> Result<PolarsDecomposition, PolarsCompatError> =
+        polars_compat::stl;
+    let _: fn(&Series, SeasonalDecomposeOpts) -> Result<PolarsDecomposition, PolarsCompatError> =
         polars_compat::seasonal_decompose;
 }
 
@@ -315,12 +322,12 @@ fn stl_interpolate_handles_polars_nulls() {
         missing: Missing::Interpolate,
         ..StlOpts::new(period as u32)
     };
-    let df = stl(&s, opts).unwrap();
-    assert_eq!(df.height(), n);
+    let d = stl(&s, opts).unwrap();
+    assert_eq!(d.trend.len(), n);
 
-    let trend    = float_col(&df, "trend");
-    let seasonal = float_col(&df, "seasonal");
-    let residual = float_col(&df, "residual");
+    let trend    = f64s(&d.trend);
+    let seasonal = f64s(&d.seasonal);
+    let residual = f64s(&d.residual);
 
     let null_positions = [20usize, 21, 80];
     for i in 0..n {
