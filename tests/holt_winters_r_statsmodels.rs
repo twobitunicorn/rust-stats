@@ -35,8 +35,8 @@ use rust_stats::tsa::{holt_winters, DecomposeMode, HoltWintersOpts};
 #[test]
 fn ses_alpha_zero_freezes_at_initial() {
     let y = [3.0, 7.0, 5.0, 9.0, 8.0];
-    let out = holt_winters(&y, HoltWintersOpts::new(0.0)).unwrap();
-    assert_eq!(out, vec![3.0; 5]);
+    let fit = holt_winters(&y, HoltWintersOpts::new(0.0)).unwrap();
+    assert_eq!(fit.fitted, vec![3.0; 5]);
 }
 
 /// statsmodels: with `smoothing_level=1.0`, SES reduces to the naive
@@ -45,8 +45,8 @@ fn ses_alpha_zero_freezes_at_initial() {
 #[test]
 fn ses_alpha_one_is_naive_forecast() {
     let y = [3.0, 7.0, 5.0, 9.0, 8.0];
-    let out = holt_winters(&y, HoltWintersOpts::new(1.0)).unwrap();
-    assert_eq!(out, vec![3.0, 3.0, 7.0, 5.0, 9.0]);
+    let fit = holt_winters(&y, HoltWintersOpts::new(1.0)).unwrap();
+    assert_eq!(fit.fitted, vec![3.0, 3.0, 7.0, 5.0, 9.0]);
 }
 
 /// Hand-computed SES recursion (α = 0.5, y = [1, 2, 3, 4]):
@@ -63,8 +63,8 @@ fn ses_alpha_one_is_naive_forecast() {
 /// initial_level=1.0, optimized=False).fittedvalues`.
 #[test]
 fn ses_alpha_half_matches_hand_computation() {
-    let out = holt_winters(&[1.0, 2.0, 3.0, 4.0], HoltWintersOpts::new(0.5)).unwrap();
-    for (i, (&a, &e)) in out.iter().zip(&[1.0, 1.0, 1.5, 2.25]).enumerate() {
+    let fit = holt_winters(&[1.0, 2.0, 3.0, 4.0], HoltWintersOpts::new(0.5)).unwrap();
+    for (i, (&a, &e)) in fit.fitted.iter().zip(&[1.0, 1.0, 1.5, 2.25]).enumerate() {
         assert_relative_eq!(a, e, max_relative = 1e-12, epsilon = 1e-12);
         let _ = i;
     }
@@ -74,8 +74,8 @@ fn ses_alpha_half_matches_hand_computation() {
 /// return the same constant — there is no error to absorb.
 #[test]
 fn ses_constant_series_is_constant() {
-    let out = holt_winters(&[4.2; 10], HoltWintersOpts::new(0.3)).unwrap();
-    for v in out {
+    let fit = holt_winters(&[4.2; 10], HoltWintersOpts::new(0.3)).unwrap();
+    for v in fit.fitted {
         assert_relative_eq!(v, 4.2, max_relative = 1e-12);
     }
 }
@@ -95,11 +95,11 @@ fn holt_alpha_beta_one_recovers_linear_after_transient() {
         beta: 1.0,
         ..HoltWintersOpts::new(1.0)
     };
-    let out = holt_winters(&y, opts).unwrap();
+    let fit = holt_winters(&y, opts).unwrap();
     // Transient at t=0 (yhat = level₀ + trend₀ = 11) and t=1 (yhat = 10).
     // From t = 2 onward, fitted == y exactly.
     for t in 2..y.len() {
-        assert_relative_eq!(out[t], y[t], max_relative = 1e-12);
+        assert_relative_eq!(fit.fitted[t], y[t], max_relative = 1e-12);
     }
 }
 
@@ -119,7 +119,7 @@ fn holt_beta_zero_reduces_to_ses() {
         },
     )
     .unwrap();
-    for (a, b) in ses.iter().zip(holt.iter()) {
+    for (a, b) in ses.fitted.iter().zip(holt.fitted.iter()) {
         assert_relative_eq!(*a, *b, max_relative = 1e-12);
     }
 }
@@ -145,8 +145,8 @@ fn additive_seasonal_recovers_perfect_seasonal_series() {
         seasonal_periods: 2,
         mode: DecomposeMode::Additive,
     };
-    let out = holt_winters(&y, opts).unwrap();
-    for (i, (&a, &e)) in out.iter().zip(y.iter()).enumerate() {
+    let fit = holt_winters(&y, opts).unwrap();
+    for (i, (&a, &e)) in fit.fitted.iter().zip(y.iter()).enumerate() {
         assert_relative_eq!(a, e, max_relative = 1e-12, epsilon = 1e-12);
         let _ = i;
     }
@@ -166,8 +166,8 @@ fn multiplicative_seasonal_recovers_perfect_seasonal_series() {
         seasonal_periods: 2,
         mode: DecomposeMode::Multiplicative,
     };
-    let out = holt_winters(&y, opts).unwrap();
-    for (&a, &e) in out.iter().zip(y.iter()) {
+    let fit = holt_winters(&y, opts).unwrap();
+    for (&a, &e) in fit.fitted.iter().zip(y.iter()) {
         assert_relative_eq!(a, e, max_relative = 1e-12, epsilon = 1e-12);
     }
 }
@@ -185,8 +185,8 @@ fn seasonal_constant_series_is_constant() {
         seasonal_periods: 4,
         mode: DecomposeMode::Additive,
     };
-    let out = holt_winters(&y, opts).unwrap();
-    for v in out {
+    let fit = holt_winters(&y, opts).unwrap();
+    for v in fit.fitted {
         assert_relative_eq!(v, 5.0, max_relative = 1e-12);
     }
 }
@@ -297,10 +297,10 @@ fn rejects_non_finite_input() {
 /// length-0 numpy arrays.
 #[test]
 fn empty_input_returns_empty() {
-    let out = holt_winters(&[], HoltWintersOpts::new(0.5)).unwrap();
-    assert!(out.is_empty());
+    let fit = holt_winters(&[], HoltWintersOpts::new(0.5)).unwrap();
+    assert!(fit.fitted.is_empty());
 
-    let out = holt_winters(
+    let fit = holt_winters(
         &[],
         HoltWintersOpts {
             beta: 0.3,
@@ -310,7 +310,7 @@ fn empty_input_returns_empty() {
         },
     )
     .unwrap();
-    assert!(out.is_empty());
+    assert!(fit.fitted.is_empty());
 }
 
 /// Fitted-value length always equals input length — a hard invariant of
@@ -325,9 +325,9 @@ fn fitted_length_matches_input_length() {
         seasonal_periods: 4,
         mode: DecomposeMode::Additive,
     };
-    let out = holt_winters(&y, opts).unwrap();
-    assert_eq!(out.len(), y.len());
-    for v in &out {
+    let fit = holt_winters(&y, opts).unwrap();
+    assert_eq!(fit.fitted.len(), y.len());
+    for v in &fit.fitted {
         assert!(v.is_finite(), "fitted value is not finite: {v}");
     }
 }

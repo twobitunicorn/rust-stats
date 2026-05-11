@@ -50,15 +50,70 @@ impl HoltWintersOpts {
     }
 }
 
-/// In-sample Holt-Winters fitted values. Output has the same length as
-/// the input.
+/// Fitted Holt-Winters model.
+#[derive(Debug, Clone)]
+pub struct HoltWintersFit {
+    /// In-sample one-step-ahead fitted values; same length as input.
+    pub fitted: Vec<f64>,
+    /// Options the model was fitted with.
+    pub opts: HoltWintersOpts,
+    /// Final level state after the last observation.
+    pub level: f64,
+    /// Final trend state. `0.0` when `beta == 0`.
+    pub trend: f64,
+    /// Final seasonal indices, in *time* order (i.e., `seasonal[0]`
+    /// corresponds to the first phase of the cycle). Empty when the
+    /// seasonal component is disabled. Index `next_idx` is the index
+    /// that will be applied at horizon `h = 1`.
+    pub seasonal: Vec<f64>,
+    /// Internal: phase index for the next forecast step.
+    next_idx: usize,
+}
+
+impl HoltWintersFit {
+    /// Multi-step-ahead forecast.
+    ///
+    /// - **SES** (`β = 0`, `γ = 0`): flat line at the final level.
+    /// - **Holt linear** (`β > 0`, `γ = 0`): linear extrapolation
+    ///   `L_T + h · b_T`.
+    /// - **Additive seasonal**: `L_T + h · b_T + S_{T+h}`, where the
+    ///   seasonal index cycles through the stored `seasonal` buffer.
+    /// - **Multiplicative seasonal**: `(L_T + h · b_T) · S_{T+h}`.
+    ///
+    /// Same convention as `forecast::hw` in R and statsmodels'
+    /// `HoltWintersResults.forecast(steps)`.
+    pub fn forecast(&self, steps: usize) -> Vec<f64> {
+        let m = self.opts.seasonal_periods as usize;
+        let has_seasonal = self.opts.gamma > 0.0 && m >= 2;
+        let multiplicative = matches!(self.opts.mode, DecomposeMode::Multiplicative);
+        let mut out = Vec::with_capacity(steps);
+        for h in 1..=steps {
+            let combined = self.level + (h as f64) * self.trend;
+            let val = if has_seasonal {
+                let s = self.seasonal[(self.next_idx + h - 1) % m];
+                if multiplicative {
+                    combined * s
+                } else {
+                    combined + s
+                }
+            } else {
+                combined
+            };
+            out.push(val);
+        }
+        out
+    }
+}
+
+/// Fit a Holt-Winters model and return the in-sample fitted values
+/// plus the final state needed for `forecast`.
 ///
 /// Errors when any smoothing parameter is outside `[0, 1]`, when the
 /// input contains non-finite values, when the input is too short for
 /// the requested model (seasonal mode requires `n >= 2 * m`; Holt's
 /// linear method requires `n >= 2`), or when multiplicative seasonal
 /// mode is requested with a non-positive value present.
-pub fn holt_winters(y: &[f64], opts: HoltWintersOpts) -> Result<Vec<f64>, HoltWintersError> {
+pub fn holt_winters(y: &[f64], opts: HoltWintersOpts) -> Result<HoltWintersFit, HoltWintersError> {
     let HoltWintersOpts {
         alpha,
         beta,
@@ -84,7 +139,14 @@ pub fn holt_winters(y: &[f64], opts: HoltWintersOpts) -> Result<Vec<f64>, HoltWi
 
     let n = y.len();
     if n == 0 {
-        return Ok(Vec::new());
+        return Ok(HoltWintersFit {
+            fitted: Vec::new(),
+            opts,
+            level: 0.0,
+            trend: 0.0,
+            seasonal: Vec::new(),
+            next_idx: 0,
+        });
     }
     if y.iter().any(|v| !v.is_finite()) {
         return Err(HoltWintersError::NonFinite);
@@ -182,7 +244,15 @@ pub fn holt_winters(y: &[f64], opts: HoltWintersOpts) -> Result<Vec<f64>, HoltWi
         trend = new_trend;
     }
 
-    Ok(fitted)
+    let next_idx = if has_seasonal { n % m } else { 0 };
+    Ok(HoltWintersFit {
+        fitted,
+        opts,
+        level,
+        trend,
+        seasonal: s_buf,
+        next_idx,
+    })
 }
 
 #[cfg(test)]
@@ -193,13 +263,13 @@ mod tests {
     fn ses_first_fitted_is_y0() {
         // alpha-only smoothing (SES) initialises level = y[0], so the
         // first one-step forecast equals y[0].
-        let out = holt_winters(
+        let fit = holt_winters(
             &[1.0, 2.0, 3.0, 4.0],
             HoltWintersOpts::new(0.5),
         )
         .unwrap();
-        assert_eq!(out.len(), 4);
-        assert_eq!(out[0], 1.0);
+        assert_eq!(fit.fitted.len(), 4);
+        assert_eq!(fit.fitted[0], 1.0);
     }
 
     #[test]
@@ -208,9 +278,9 @@ mod tests {
             beta: 0.3,
             ..HoltWintersOpts::new(0.5)
         };
-        let out = holt_winters(&[1.0, 2.0, 3.0, 4.0, 5.0], opts).unwrap();
-        assert_eq!(out.len(), 5);
-        for v in &out {
+        let fit = holt_winters(&[1.0, 2.0, 3.0, 4.0, 5.0], opts).unwrap();
+        assert_eq!(fit.fitted.len(), 5);
+        for v in &fit.fitted {
             assert!(v.is_finite());
         }
     }
@@ -261,7 +331,50 @@ mod tests {
 
     #[test]
     fn empty_input_returns_empty() {
-        let out = holt_winters(&[], HoltWintersOpts::new(0.5)).unwrap();
-        assert!(out.is_empty());
+        let fit = holt_winters(&[], HoltWintersOpts::new(0.5)).unwrap();
+        assert!(fit.fitted.is_empty());
+    }
+
+    #[test]
+    fn ses_forecast_is_flat_at_final_level() {
+        let fit = holt_winters(&[1.0, 2.0, 3.0, 4.0], HoltWintersOpts::new(0.5)).unwrap();
+        let f = fit.forecast(5);
+        for v in &f {
+            assert!((v - fit.level).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn holt_forecast_extrapolates_linearly() {
+        let opts = HoltWintersOpts {
+            beta: 0.5,
+            ..HoltWintersOpts::new(0.5)
+        };
+        let fit = holt_winters(&[1.0, 2.0, 3.0, 4.0, 5.0], opts).unwrap();
+        let f = fit.forecast(3);
+        for (h, fc) in f.iter().enumerate() {
+            let expected = fit.level + (h as f64 + 1.0) * fit.trend;
+            assert!((fc - expected).abs() < 1e-12, "h={h}: {fc} vs {expected}");
+        }
+    }
+
+    #[test]
+    fn additive_seasonal_forecast_cycles_through_indices() {
+        // Perfect [10, 20] additive cycle, m = 2. After fitting, the
+        // forecast should repeat 10, 20, 10, 20, ...
+        let y = [10.0, 20.0, 10.0, 20.0, 10.0, 20.0, 10.0, 20.0];
+        let opts = HoltWintersOpts {
+            alpha: 0.5,
+            beta: 0.0,
+            gamma: 0.5,
+            seasonal_periods: 2,
+            mode: DecomposeMode::Additive,
+        };
+        let fit = holt_winters(&y, opts).unwrap();
+        let f = fit.forecast(4);
+        let expected = [10.0, 20.0, 10.0, 20.0];
+        for (a, e) in f.iter().zip(expected.iter()) {
+            assert!((a - e).abs() < 1e-12, "got {a}, expected {e}");
+        }
     }
 }

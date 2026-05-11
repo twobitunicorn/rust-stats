@@ -24,5 +24,5 @@ pub use transforms::{
 pub use tsa::{
     arima, arima_with_exog, auto_arima, holt_winters, seasonal_decompose, stl, ArimaFit,
     ArimaMethod, ArimaOpts, AutoArimaOpts, DecomposeMode, Decomposition, ForecastResult,
-    HoltWintersOpts, Missing, SeasonalDecomposeOpts, SeasonalWindow, StlOpts,
+    HoltWintersFit, HoltWintersOpts, Missing, SeasonalDecomposeOpts, SeasonalWindow, StlOpts,
 };
