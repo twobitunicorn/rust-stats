@@ -1,4 +1,4 @@
-use rust_stats::{Matrix, Ols};
+use rust_stats_ols::{Matrix, Ols};
 
 #[test]
 fn builder_constructs_with_intercept_by_default() {

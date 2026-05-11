@@ -1,5 +1,5 @@
 use approx::assert_relative_eq;
-use rust_stats::{Matrix, Ols};
+use rust_stats_ols::{Matrix, Ols};
 
 /// Synthetic: y = 2 + 3*x1 - 1*x2 exactly, no noise, with intercept.
 #[test]

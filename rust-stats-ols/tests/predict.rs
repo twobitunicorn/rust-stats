@@ -1,7 +1,7 @@
 use approx::assert_relative_eq;
-use rust_stats::{Matrix, Ols, OlsError};
+use rust_stats_ols::{Matrix, Ols, OlsError};
 
-fn fit_simple() -> (rust_stats::OlsResults, Matrix<f64>) {
+fn fit_simple() -> (rust_stats_ols::OlsResults, Matrix<f64>) {
     let n = 20;
     let x = Matrix::from_fn(n, 1, |i, _| i as f64 * 0.1);
     let y: Vec<f64> = (0..n).map(|i| 1.0 + 2.0 * (i as f64) * 0.1).collect();

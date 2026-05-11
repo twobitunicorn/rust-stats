@@ -1,7 +1,7 @@
 use approx::assert_relative_eq;
-use rust_stats::{CovType, Matrix, Ols};
+use rust_stats_ols::{CovType, Matrix, Ols};
 
-fn small_heteroskedastic() -> rust_stats::OlsResults {
+fn small_heteroskedastic() -> rust_stats_ols::OlsResults {
     // y = 1 + 2x + ε with Var(ε) ∝ x²
     let n = 30;
     let x = Matrix::from_fn(n, 1, |i, _| (i as f64) * 0.1 + 0.5);

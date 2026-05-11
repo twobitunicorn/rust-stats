@@ -1,6 +1,6 @@
 //! Prediction on new observations.
 
-use crate::distributions::t_quantile;
+use rust_stats::distributions::t_quantile;
 use crate::error::OlsError;
 use crate::regression::design::build_design_matrix;
 use crate::regression::results::OlsResults;

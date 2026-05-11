@@ -15,13 +15,12 @@ use arrow::array::{Array, ArrayRef, Float64Array, RecordBatch};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use rayon::prelude::*;
 
-use crate::error::{LoessError, OlsError, SeasonalDecomposeError, StlError};
+use crate::error::{LoessError, SeasonalDecomposeError, StlError};
 use crate::smoothing::loess as loess_core;
 use crate::tsa::{
     seasonal_decompose as sd_core, stl as stl_core, Decomposition,
     SeasonalDecomposeOpts, StlOpts,
 };
-use crate::{Matrix, Ols, OlsResults};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ArrowError {
@@ -29,10 +28,6 @@ pub enum ArrowError {
     HasNulls { col: String, nulls: usize },
     #[error("column '{col}' has type {got}; expected Float64")]
     WrongType { col: String, got: DataType },
-    #[error("y length {ny} does not match x rows {nx}")]
-    LengthMismatch { ny: usize, nx: usize },
-    #[error(transparent)]
-    Ols(#[from] OlsError),
     #[error(transparent)]
     Loess(#[from] LoessError),
     #[error(transparent)]
@@ -60,38 +55,6 @@ fn float_col<'a>(batch: &'a RecordBatch, j: usize) -> Result<&'a Float64Array, A
             col: field.name().clone(),
             got: arr.data_type().clone(),
         })
-}
-
-/// Pack a RecordBatch of Float64 columns into a column-major `Matrix<f64>`.
-fn batch_to_matrix(batch: &RecordBatch) -> Result<Matrix<f64>, ArrowError> {
-    let n = batch.num_rows();
-    let p = batch.num_columns();
-    let mut cols: Vec<&[f64]> = Vec::with_capacity(p);
-    for j in 0..p {
-        let arr = float_col(batch, j)?;
-        cols.push(as_slice(arr, batch.schema().field(j).name())?);
-    }
-    Ok(Matrix::from_fn(n, p, |i, j| cols[j][i]))
-}
-
-/// Fit OLS where `x` is a `RecordBatch` of `Float64` feature columns. An
-/// intercept is auto-prepended; coefficient names become `["(Intercept)",
-/// <field-names>...]`.
-pub fn fit_ols(y: &Float64Array, x: &RecordBatch) -> Result<OlsResults, ArrowError> {
-    if y.len() != x.num_rows() {
-        return Err(ArrowError::LengthMismatch {
-            ny: y.len(),
-            nx: x.num_rows(),
-        });
-    }
-    let y_slice = as_slice(y, "y")?;
-    let x_mat = batch_to_matrix(x)?;
-    let mut names: Vec<String> = Vec::with_capacity(x.num_columns() + 1);
-    names.push("(Intercept)".to_string());
-    for f in x.schema().fields() {
-        names.push(f.name().clone());
-    }
-    Ok(Ols::new(y_slice, x_mat.as_ref()).fit()?.with_names(names))
 }
 
 /// LOESS on an Arrow `Float64Array`. Output array length equals input length.

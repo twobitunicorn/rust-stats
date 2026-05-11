@@ -1,4 +1,4 @@
-use rust_stats::{Matrix, Ols, OlsError};
+use rust_stats_ols::{Matrix, Ols, OlsError};
 
 #[test]
 fn fit_rejects_rank_deficient_x() {

@@ -1,5 +1,5 @@
 use approx::assert_relative_eq;
-use rust_stats::{CovType, Matrix, Ols};
+use rust_stats_ols::{CovType, Matrix, Ols};
 use serde::Deserialize;
 use std::path::PathBuf;
 

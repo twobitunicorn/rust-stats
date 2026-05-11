@@ -1,6 +1,6 @@
-use rust_stats::{CovType, Matrix, Ols};
+use rust_stats_ols::{CovType, Matrix, Ols};
 
-fn fit() -> rust_stats::OlsResults {
+fn fit() -> rust_stats_ols::OlsResults {
     let n = 16;
     let x = Matrix::from_fn(n, 2, |i, j| {
         if j == 0 { (i as f64) * 0.13 } else { ((i as f64) * 0.5).sin() }

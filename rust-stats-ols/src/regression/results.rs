@@ -79,7 +79,7 @@ impl OlsResults {
     }
 
     pub fn f_pvalue(&self) -> f64 {
-        crate::distributions::f_sf(
+        rust_stats::distributions::f_sf(
             self.f_statistic(),
             self.df_model() as f64,
             self.df_resid() as f64,
@@ -143,7 +143,7 @@ impl OlsResults {
         let t = self.t_values();
         let df = self.df_resid() as f64;
         t.iter()
-            .map(|&ti| crate::distributions::t_two_sided_pvalue(ti, df))
+            .map(|&ti| rust_stats::distributions::t_two_sided_pvalue(ti, df))
             .collect()
     }
 
@@ -158,7 +158,7 @@ impl OlsResults {
             alpha > 0.0 && alpha < 1.0,
             "alpha must be in (0, 1); use conf_int_with for a Result-returning version"
         );
-        let crit = crate::distributions::t_quantile(1.0 - alpha / 2.0, self.df_resid() as f64);
+        let crit = rust_stats::distributions::t_quantile(1.0 - alpha / 2.0, self.df_resid() as f64);
         let se = self.classical_std_err_inner();
         Matrix::from_fn(self.p, 2, |i, j| match j {
             0 => self.coef[i] - crit * se[i],
@@ -168,7 +168,7 @@ impl OlsResults {
 
     /// Compute SE/t/p for the requested covariance estimator.
     pub fn inference(&self, cov: CovType) -> Inference {
-        use crate::distributions::{t_two_sided_pvalue, z_two_sided_pvalue};
+        use rust_stats::distributions::{t_two_sided_pvalue, z_two_sided_pvalue};
         let cov_mat = self.cov_internal(cov);
         let df = self.df_resid() as f64;
         let std_err: Vec<f64> = (0..self.p)
@@ -196,10 +196,10 @@ impl OlsResults {
         let inf = self.inference(cov);
         let crit = match cov {
             CovType::NonRobust => {
-                crate::distributions::t_quantile(1.0 - alpha / 2.0, self.df_resid() as f64)
+                rust_stats::distributions::t_quantile(1.0 - alpha / 2.0, self.df_resid() as f64)
             }
             CovType::HC0 | CovType::HC1 | CovType::HC2 | CovType::HC3 => {
-                crate::distributions::z_quantile(1.0 - alpha / 2.0)
+                rust_stats::distributions::z_quantile(1.0 - alpha / 2.0)
             }
         };
         Ok(Matrix::from_fn(self.p, 2, |i, j| match j {

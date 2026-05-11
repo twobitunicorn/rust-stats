@@ -3,7 +3,7 @@
 //! Uses a hard-coded copy of the classic Longley macroeconomic dataset
 //! and prints the OLS fit summary.
 
-use rust_stats::{Matrix, Ols};
+use rust_stats_ols::{Matrix, Ols};
 
 const Y: [f64; 16] = [
     60323.0, 61122.0, 60171.0, 61187.0, 63221.0, 63639.0, 64989.0, 63761.0,

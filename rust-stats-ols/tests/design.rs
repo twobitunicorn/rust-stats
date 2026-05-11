@@ -1,6 +1,6 @@
 use approx::assert_relative_eq;
-use rust_stats::regression::design::build_design_matrix;
-use rust_stats::Matrix;
+use rust_stats_ols::regression::design::build_design_matrix;
+use rust_stats_ols::Matrix;
 
 #[test]
 fn with_intercept_prepends_column_of_ones() {

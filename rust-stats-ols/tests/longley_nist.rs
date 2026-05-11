@@ -12,7 +12,7 @@
 //! is: rust `coef[0]` = stats `params[6]`, rust `coef[1..7]` = stats
 //! `params[0..6]`.
 
-use rust_stats::{CovType, Matrix, Ols};
+use rust_stats_ols::{CovType, Matrix, Ols};
 use serde::Deserialize;
 use std::path::PathBuf;
 
@@ -94,7 +94,7 @@ const ESS:          f64 = 184172401.944494;
 const SSR:          f64 = 836424.055505915;
 const FVALUE:       f64 = 330.285339234588;
 
-fn fit() -> rust_stats::OlsResults {
+fn fit() -> rust_stats_ols::OlsResults {
     let g = load();
     let x = matrix_from(&g.x);
     Ols::new(&g.y, x.as_ref()).fit().expect("fit failed")

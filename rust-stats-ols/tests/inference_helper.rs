@@ -1,7 +1,7 @@
 use approx::assert_relative_eq;
-use rust_stats::{CovType, Matrix, Ols, OlsError};
+use rust_stats_ols::{CovType, Matrix, Ols, OlsError};
 
-fn fit() -> rust_stats::OlsResults {
+fn fit() -> rust_stats_ols::OlsResults {
     let n = 25;
     let x = Matrix::from_fn(n, 2, |i, j| {
         let t = (i as f64) * 0.1;

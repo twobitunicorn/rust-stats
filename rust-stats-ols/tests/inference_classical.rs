@@ -1,8 +1,8 @@
 use approx::assert_relative_eq;
-use rust_stats::{CovType, Matrix, Ols};
+use rust_stats_ols::{CovType, Matrix, Ols};
 
 /// Use a noisy 5x1 problem with intercept for non-degenerate inference.
-fn noisy_small() -> rust_stats::OlsResults {
+fn noisy_small() -> rust_stats_ols::OlsResults {
     let y: Vec<f64> = (0..5)
         .map(|i| (i as f64 + 1.0) + 0.1 * (i as f64 - 2.0))
         .collect();

@@ -1,9 +1,9 @@
 use approx::assert_relative_eq;
-use rust_stats::{Matrix, Ols};
+use rust_stats_ols::{Matrix, Ols};
 
 /// Build a deterministic small problem with non-zero residuals so we can
 /// assert specific values.
-fn small_fit() -> rust_stats::OlsResults {
+fn small_fit() -> rust_stats_ols::OlsResults {
     let y: Vec<f64> = vec![1.0, 2.0, 1.5, 3.0, 2.5, 4.0];
     let x = Matrix::from_fn(6, 1, |i, _| (i as f64) + 1.0);
     Ols::new(&y, x.as_ref()).fit().unwrap()

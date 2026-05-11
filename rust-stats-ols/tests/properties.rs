@@ -1,5 +1,5 @@
 use approx::assert_abs_diff_eq;
-use rust_stats::{Matrix, Ols};
+use rust_stats_ols::{Matrix, Ols};
 
 /// Residuals must be orthogonal to every column of X̃ (including the intercept
 /// column when present).

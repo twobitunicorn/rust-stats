@@ -1,136 +1,18 @@
-//! Tests for the optional `arrow` feature. The whole file compiles to
-//! nothing when the feature is off so `cargo test` stays clean for users
-//! who haven't opted in.
+//! Tests for the optional `arrow` feature. Compiles to nothing when the
+//! feature is off so `cargo test` stays clean for users who haven't opted in.
 
 #![cfg(feature = "arrow")]
 
 use std::sync::Arc;
 
-use arrow::array::{Array, Float64Array, Int64Array, RecordBatch};
+use arrow::array::{Array, Float64Array, RecordBatch};
 use arrow::datatypes::{DataType, Field, Schema};
-use serde::Deserialize;
-use std::path::PathBuf;
 
 use rust_stats::arrow_compat::{
-    self, fit_ols, loess, loess_batch, seasonal_decompose, seasonal_decompose_batch, stl,
-    stl_batch, ArrowError,
+    self, loess, loess_batch, seasonal_decompose, seasonal_decompose_batch, stl, stl_batch,
+    ArrowError,
 };
-use rust_stats::{CovType, DecomposeMode, SeasonalDecomposeOpts, StlOpts};
-
-// ── Shared fixture helpers ──────────────────────────────────────────────
-
-#[derive(Deserialize)]
-struct OlsGolden {
-    y: Vec<f64>,
-    x: Vec<Vec<f64>>,
-    coef: Vec<f64>,
-    r_squared: f64,
-}
-
-fn load_ols(name: &str) -> OlsGolden {
-    let path: PathBuf = ["tests", "golden", &format!("{name}.json")].iter().collect();
-    let bytes = std::fs::read(&path).expect("missing golden — run tests/golden/generate.py");
-    serde_json::from_slice(&bytes).expect("invalid JSON")
-}
-
-fn batch_from_rows(rows: &[Vec<f64>], names: &[&str]) -> RecordBatch {
-    let n = rows.len();
-    let p = rows[0].len();
-    assert_eq!(p, names.len());
-    let mut cols: Vec<Arc<dyn Array>> = Vec::with_capacity(p);
-    let mut fields = Vec::with_capacity(p);
-    for j in 0..p {
-        let col: Float64Array = (0..n).map(|i| rows[i][j]).collect();
-        cols.push(Arc::new(col));
-        fields.push(Field::new(names[j], DataType::Float64, true));
-    }
-    RecordBatch::try_new(Arc::new(Schema::new(fields)), cols).unwrap()
-}
-
-// ── OLS ─────────────────────────────────────────────────────────────────
-
-#[test]
-fn ols_matches_slice_api_on_longley() {
-    let g = load_ols("longley");
-    let y_arr = Float64Array::from(g.y.clone());
-    let names = ["GNPDEFL", "GNP", "UNEMP", "ARMED", "POP", "YEAR"];
-    let x_batch = batch_from_rows(&g.x, &names);
-
-    let res = fit_ols(&y_arr, &x_batch).unwrap();
-
-    // Coefficients match the golden to floating-point precision (relative,
-    // because the Longley intercept is ~3.5e6 and even ulp-level noise from
-    // the Arrow → faer pack vs reading from JSON produces ~1 unit of drift).
-    for i in 0..res.coef().len() {
-        let denom = g.coef[i].abs().max(1.0);
-        let rel = (res.coef()[i] - g.coef[i]).abs() / denom;
-        assert!(
-            rel < 1e-9,
-            "coef[{i}]: {} vs {} (rel {rel})", res.coef()[i], g.coef[i]
-        );
-    }
-    assert!((res.r_squared() - g.r_squared).abs() < 1e-10);
-
-    // Schema field names flow through to the summary table.
-    let expected_names = [
-        "(Intercept)", "GNPDEFL", "GNP", "UNEMP", "ARMED", "POP", "YEAR",
-    ];
-    let got_names = res.names().expect("names should be set");
-    for i in 0..expected_names.len() {
-        assert_eq!(got_names[i], expected_names[i]);
-    }
-
-    // Inference still works through the returned OlsResults.
-    let inf = res.inference(CovType::HC3);
-    assert_eq!(inf.std_err.len(), 7);
-}
-
-#[test]
-fn ols_rejects_nulls() {
-    let g = load_ols("longley");
-    let mut y_vals: Vec<Option<f64>> = g.y.iter().map(|v| Some(*v)).collect();
-    y_vals[3] = None;
-    let y_arr = Float64Array::from(y_vals);
-    let names = ["GNPDEFL", "GNP", "UNEMP", "ARMED", "POP", "YEAR"];
-    let x_batch = batch_from_rows(&g.x, &names);
-
-    let err = fit_ols(&y_arr, &x_batch).unwrap_err();
-    assert!(matches!(err, ArrowError::HasNulls { col, nulls: 1 } if col == "y"));
-}
-
-#[test]
-fn ols_rejects_wrong_column_type() {
-    let g = load_ols("longley");
-    let y_arr = Float64Array::from(g.y.clone());
-
-    // Build a batch with an Int64 column where Float64 is expected.
-    let n = g.x.len();
-    let int_col: Int64Array = (0..n as i64).collect();
-    let f64_col: Float64Array = (0..n).map(|i| g.x[i][1]).collect();
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("bad", DataType::Int64, true),
-        Field::new("ok",  DataType::Float64, true),
-    ]));
-    let batch = RecordBatch::try_new(
-        schema,
-        vec![Arc::new(int_col), Arc::new(f64_col)],
-    )
-    .unwrap();
-
-    let err = fit_ols(&y_arr, &batch).unwrap_err();
-    assert!(matches!(err, ArrowError::WrongType { col, .. } if col == "bad"));
-}
-
-#[test]
-fn ols_rejects_length_mismatch() {
-    let g = load_ols("longley");
-    let y_arr = Float64Array::from(vec![1.0; 5]); // wrong length
-    let names = ["GNPDEFL", "GNP", "UNEMP", "ARMED", "POP", "YEAR"];
-    let x_batch = batch_from_rows(&g.x, &names);
-
-    let err = fit_ols(&y_arr, &x_batch).unwrap_err();
-    assert!(matches!(err, ArrowError::LengthMismatch { ny: 5, nx: 16 }));
-}
+use rust_stats::{DecomposeMode, SeasonalDecomposeOpts, StlOpts};
 
 // ── LOESS ───────────────────────────────────────────────────────────────
 
@@ -162,7 +44,6 @@ fn loess_rejects_nulls() {
 
 #[test]
 fn stl_returns_record_batch_with_expected_schema() {
-    // Use a simple seasonal series that the core STL test suite also covers.
     let period = 4u32;
     let n = 32usize;
     let y: Vec<f64> = (0..n)
@@ -219,13 +100,8 @@ fn seasonal_decompose_returns_record_batch_with_nan_edges() {
     }
 }
 
-// ── Sanity: the public adapter module re-exports nothing surprising ────
-
 #[test]
 fn module_surface() {
-    // Forces the symbols we expect to be public to exist.
-    let _: fn(&Float64Array, &RecordBatch) -> Result<rust_stats::OlsResults, ArrowError> =
-        arrow_compat::fit_ols;
     let _: fn(&Float64Array, f64, u8) -> Result<Float64Array, ArrowError> = arrow_compat::loess;
     let _: fn(&Float64Array, StlOpts) -> Result<RecordBatch, ArrowError> = arrow_compat::stl;
     let _: fn(&Float64Array, SeasonalDecomposeOpts) -> Result<RecordBatch, ArrowError> =
@@ -235,7 +111,6 @@ fn module_surface() {
 // ── Batched (multi-column) adapters ────────────────────────────────────
 
 fn series_with_seasonality(n: usize, period: usize, seed: u64) -> Vec<f64> {
-    // Cheap deterministic xorshift for noise.
     let mut s = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
     let mut next = || {
         s ^= s << 13;
@@ -259,7 +134,7 @@ fn floatcol(batch: &RecordBatch, j: usize) -> &Float64Array {
 fn batch_of_series(names: &[&str], series: Vec<Vec<f64>>) -> RecordBatch {
     assert_eq!(names.len(), series.len());
     let mut fields = Vec::with_capacity(names.len());
-    let mut cols:  Vec<Arc<dyn Array>> = Vec::with_capacity(names.len());
+    let mut cols: Vec<Arc<dyn Array>> = Vec::with_capacity(names.len());
     for (name, s) in names.iter().zip(series.into_iter()) {
         fields.push(Field::new(*name, DataType::Float64, true));
         cols.push(Arc::new(Float64Array::from(s)));
@@ -277,7 +152,7 @@ fn loess_batch_matches_scalar_column_by_column() {
     let batch = batch_of_series(&names, series.clone());
 
     let out_batch = loess_batch(&batch, 0.3, 1).unwrap();
-    assert_eq!(out_batch.schema(), batch.schema()); // schema preserved
+    assert_eq!(out_batch.schema(), batch.schema());
     assert_eq!(out_batch.num_rows(), n);
 
     for j in 0..5 {
