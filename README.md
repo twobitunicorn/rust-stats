@@ -3,12 +3,83 @@
 Pure-Rust statistical modeling, statsmodels-inspired. LOESS smoothing
 and Cleveland 1990 STL / classical seasonal decomposition.
 
+## Quick start
+
+Add the dependency:
+
+```toml
+[dependencies]
+rust-stats = "0.1"
+```
+
+Decompose a seasonal series:
+
 ```rust
 use rust_stats::{stl, StlOpts};
 
-let decomp = stl(&y, StlOpts::new(12)).unwrap();
-// decomp.trend, decomp.seasonal, decomp.residual reconstruct y exactly.
+fn main() {
+    // 12 years of monthly data (n = 144, period = 12).
+    let y: Vec<f64> = monthly_series();
+
+    let d = stl(&y, StlOpts::new(12)).unwrap();
+    // d.trend, d.seasonal, d.residual each have length n=144.
+    // Reconstruction holds: y[i] == d.trend[i] + d.seasonal[i] + d.residual[i].
+
+    println!("first trend value: {:.2}", d.trend[0]);
+    println!("january seasonality: {:.2}", d.seasonal[0]);
+}
+# fn monthly_series() -> Vec<f64> { vec![0.0; 144] }
 ```
+
+Common options use struct-update syntax. For example, robust STL on
+data with outliers, with a stationary seasonal pattern and NaN handling:
+
+```rust
+use rust_stats::{stl, StlOpts, SeasonalWindow, Missing};
+
+let d = stl(&y, StlOpts {
+    seasonal_window: SeasonalWindow::Periodic,
+    outer_iters:     15,                  // R's `robust = TRUE` default
+    missing:         Missing::Interpolate, // linear-fill NaNs
+    ..StlOpts::new(12)
+})?;
+```
+
+For multiplicative series (e.g. AirPassengers, where seasonal amplitude
+grows with the level):
+
+```rust
+use rust_stats::{stl, StlOpts, DecomposeMode};
+
+let d = stl(&y, StlOpts {
+    mode: DecomposeMode::Multiplicative,
+    ..StlOpts::new(12)
+})?;
+// d.trend in original units; d.seasonal and d.residual are
+// dimensionless ratios centred around 1.
+// y[i] == d.trend[i] * d.seasonal[i] * d.residual[i]
+```
+
+LOESS on its own:
+
+```rust
+use rust_stats::loess;
+
+let smoothed = loess(&y, 0.3, 1)?;  // span = 30%, degree = 1
+```
+
+Classical centered-MA decomposition (faster than STL, NaN edges at the
+first/last `period/2` positions):
+
+```rust
+use rust_stats::{seasonal_decompose, SeasonalDecomposeOpts};
+
+let d = seasonal_decompose(&y, SeasonalDecomposeOpts::new(12))?;
+```
+
+For multi-series workloads, enable the `arrow` feature and use the
+batched variants (`stl_batch`, `loess_batch`, `seasonal_decompose_batch`)
+— see the [Apache Arrow interop](#apache-arrow-interop) section below.
 
 ## Features
 
