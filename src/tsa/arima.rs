@@ -25,10 +25,13 @@
 
 use crate::error::ArimaError;
 
+mod auto;
 mod kalman;
 mod nelder_mead;
 mod ols;
 mod transform;
+
+pub use auto::{auto_arima, AutoArimaOpts};
 
 /// Estimation method.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,6 +141,10 @@ pub struct ArimaFit {
     pub log_likelihood: f64,
     /// Akaike Information Criterion.
     pub aic: f64,
+    /// Corrected AIC (Hurvich-Tsai 1989) — adds a finite-sample
+    /// penalty to AIC that becomes important when `k / n` is not small.
+    /// `auto_arima` uses this by default.
+    pub aicc: f64,
     /// Bayesian Information Criterion.
     pub bic: f64,
     /// In-sample fitted values on the *original* (un-differenced) scale,
@@ -408,7 +415,13 @@ fn arima_no_exog(y: &[f64], opts: ArimaOpts) -> Result<ArimaFit, ArimaError> {
     let log_lik =
         -0.5 * (m_eff as f64) * ((2.0 * std::f64::consts::PI * sigma2).ln() + 1.0);
     let aic = 2.0 * k - 2.0 * log_lik;
-    let bic = (m_eff as f64).ln() * k - 2.0 * log_lik;
+    let n_eff = m_eff as f64;
+    let aicc = if n_eff - k - 1.0 > 0.0 {
+        aic + 2.0 * k * (k + 1.0) / (n_eff - k - 1.0)
+    } else {
+        f64::INFINITY
+    };
+    let bic = n_eff.ln() * k - 2.0 * log_lik;
 
     // 9. Tail state for forecasting.
     let take_n = recursion_order.max(1);
@@ -442,6 +455,7 @@ fn arima_no_exog(y: &[f64], opts: ArimaOpts) -> Result<ArimaFit, ArimaError> {
         sigma2,
         log_likelihood: log_lik,
         aic,
+        aicc,
         bic,
         fitted,
         residuals,
@@ -467,6 +481,26 @@ pub struct ForecastResult {
 }
 
 impl ArimaFit {
+    /// Ljung-Box test on the model residuals. `lags` is the cutoff
+    /// `h`; rule of thumb is `min(10, n/5)` for non-seasonal residuals
+    /// and `2·m` for seasonal. The χ² degrees of freedom are reduced
+    /// by the count of ARMA parameters used in the fit
+    /// (`p + q + P + Q`), so `LjungBox::p_value` reflects the residual
+    /// test for *this* model, not a raw white-noise check.
+    pub fn ljung_box(&self, lags: usize) -> crate::tsa::diagnostics::LjungBox {
+        let warmup = (self.opts.d as usize)
+            + (self.opts.seasonal_d as usize) * (self.opts.seasonal_period as usize)
+            + (self.opts.p as usize).max(self.opts.q as usize)
+            + (self.opts.seasonal_p as usize) * (self.opts.seasonal_period as usize)
+            + (self.opts.seasonal_q as usize) * (self.opts.seasonal_period as usize);
+        let m = self.opts.p as usize
+            + self.opts.q as usize
+            + self.opts.seasonal_p as usize
+            + self.opts.seasonal_q as usize;
+        let tail = &self.residuals[warmup.min(self.residuals.len())..];
+        crate::tsa::diagnostics::ljung_box(tail, lags, m)
+    }
+
     /// Multi-step-ahead point forecasts on the *original* scale.
     ///
     /// Future innovations are taken to be zero (their expectation), so

@@ -23,7 +23,7 @@ pub use transforms::{
     inv_box_cox, min_max_scale, z_score,
 };
 pub use tsa::{
-    arima, arima_with_exog, holt_winters, seasonal_decompose, stl, ArimaFit, ArimaMethod,
-    ArimaOpts, DecomposeMode, Decomposition, ForecastResult, HoltWintersOpts, Missing,
-    SeasonalDecomposeOpts, SeasonalWindow, StlOpts,
+    arima, arima_with_exog, auto_arima, holt_winters, seasonal_decompose, stl, ArimaFit,
+    ArimaMethod, ArimaOpts, AutoArimaOpts, DecomposeMode, Decomposition, ForecastResult,
+    HoltWintersOpts, Missing, SeasonalDecomposeOpts, SeasonalWindow, StlOpts,
 };

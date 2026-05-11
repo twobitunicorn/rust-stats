@@ -93,7 +93,12 @@ batched variants (`stl_batch`, `loess_batch`, `seasonal_decompose_batch`)
 - **ARIMA / SARIMA / ARIMAX** — full ARIMA(p, d, q) and seasonal
   SARIMA(p, d, q)(P, D, Q)[m] with optional exogenous regressors;
   three estimation paths (CSS, Kalman MLE, CSS-ML), point forecasts,
-  and Gaussian prediction intervals.
+  Gaussian prediction intervals, and AIC / AICc / BIC.
+- **`auto_arima`** — Hyndman-Khandakar stepwise model selection with
+  KPSS-driven non-seasonal differencing, strength-of-seasonality
+  driven seasonal differencing, and AICc as the search criterion.
+- **Diagnostics** — Ljung-Box test for serial correlation in residuals;
+  KPSS test for level / trend stationarity (used by `auto_arima`).
 - **Holt-Winters** — additive and multiplicative exponential smoothing
   with caller-supplied α, β, γ.
 - **Transforms** — `center`, `z_score`, `min_max_scale`, `box_cox`;
