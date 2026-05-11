@@ -92,7 +92,11 @@ batched variants (`stl_batch`, `loess_batch`, `seasonal_decompose_batch`)
   additive and multiplicative, matching statsmodels exactly.
 - **Apache Arrow interop** (optional, `arrow` feature) — thin adapters so
   the same routines accept `Float64Array` / `RecordBatch` and return
-  Arrow outputs. Enables direct Polars / DataFusion / DuckDB integration.
+  Arrow outputs.
+- **Polars interop** (optional, `polars` feature) — thin adapters so the
+  same routines accept Polars `Series` / `DataFrame` and return Polars
+  outputs. When combined with `arrow`, `loess_batch` routes through the
+  shared SIMD kernel.
 
 ## Apache Arrow interop
 
@@ -141,6 +145,49 @@ than silently substituting. Use `arrow::compute::filter` or Polars'
 
 The feature is off by default; users without it see zero impact on
 compile time, binary size, or dependency graph.
+
+## Polars interop
+
+Enable the `polars` feature:
+
+```toml
+rust-stats = { version = "...", features = ["polars"] }
+```
+
+```rust
+use rust_stats::polars_compat;
+use rust_stats::StlOpts;
+use polars::prelude::*;
+
+let y_series: Series = /* ... */;
+
+let smoothed: Series = polars_compat::loess(&y_series, 0.3, 1)?;
+let decomp:   DataFrame = polars_compat::stl(&y_series, StlOpts::new(12))?;
+// decomp has columns `trend | seasonal | residual`.
+```
+
+Multi-series workloads use `loess_batch` / `stl_batch` /
+`seasonal_decompose_batch`, taking a `DataFrame` and preserving its
+column schema:
+
+```rust
+// prices: a DataFrame with one Float64 column per ticker
+let trends = polars_compat::stl_batch(&prices, StlOpts::new(252))?.trend;
+// trends has the same schema as prices — column "AAPL" is AAPL's trend.
+
+let smoothed = polars_compat::loess_batch(&prices, 0.3, 1)?;
+```
+
+`stl_batch` and `seasonal_decompose_batch` return a
+`PolarsDecompositionBatch` with three `DataFrame`s (`trend`, `seasonal`,
+`residual`), each sharing the input schema.
+
+Validation runs up front: input columns must be `Float64` with no nulls,
+or the call returns `PolarsCompatError::NotFloat64` or `HasNulls`.
+
+When both `polars` and `arrow` features are on, `loess_batch` routes
+through the shared SIMD batched-LOESS kernel; with just `polars`, it
+falls back to rayon-over-columns scalar LOESS.
 
 ## statsmodels parity
 

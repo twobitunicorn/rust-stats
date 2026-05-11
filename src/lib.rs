@@ -11,6 +11,9 @@ pub mod tsa;
 #[cfg(feature = "arrow")]
 pub mod arrow_compat;
 
+#[cfg(feature = "polars")]
+pub mod polars_compat;
+
 pub use error::{LoessError, SeasonalDecomposeError, StlError};
 pub use smoothing::{loess, loess_at};
 pub use tsa::{
