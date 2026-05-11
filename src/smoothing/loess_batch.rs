@@ -1,54 +1,14 @@
 //! Batched LOESS for multi-column inputs.
 //!
-//! With the `simd` feature on (stable Rust, backed by `pulp`), this
-//! module dispatches to a kernel that vectorises across columns at the
-//! best SIMD width available at runtime (SSE2 / AVX2 / AVX-512 / NEON).
-//! Without the feature, the fallback is plain `rayon`-over-columns
-//! scalar LOESS. Both implementations expose the same
-//! `loess_batch_simd` entry point so `arrow_compat::loess_batch` doesn't
-//! know which is compiled.
+//! Dispatches to a `pulp`-backed kernel that vectorises across columns
+//! at the best SIMD width available at runtime (SSE2 / AVX2 / AVX-512 on
+//! x86_64, NEON on aarch64; scalar fallback elsewhere). The entry point
+//! `loess_batch_simd` is what `arrow_compat::loess_batch` calls.
 //!
 //! Correctness is guarded by the column-by-column equivalence test in
 //! `tests/arrow_compat.rs` — batched output must match the scalar
 //! `loess()` to ~1e-12.
 
-#[cfg(not(feature = "simd"))]
-use crate::error::LoessError;
-
-#[cfg(not(feature = "simd"))]
-pub(crate) fn loess_batch_simd(
-    cols: &[&[f64]],
-    span: f64,
-    degree: u8,
-    out: &mut [Vec<f64>],
-) -> Result<(), LoessError> {
-    use rayon::prelude::*;
-
-    if cols.is_empty() {
-        return Ok(());
-    }
-    let n = cols[0].len();
-    if n == 0 {
-        return Err(LoessError::Empty);
-    }
-    for c in cols {
-        if c.len() != n {
-            return Err(LoessError::Empty);
-        }
-    }
-
-    let results: Result<Vec<Vec<f64>>, LoessError> = cols
-        .par_iter()
-        .map(|c| crate::smoothing::loess::loess(c, span, degree))
-        .collect();
-    let results = results?;
-    for (slot, src) in out.iter_mut().zip(results) {
-        *slot = src;
-    }
-    Ok(())
-}
-
-#[cfg(feature = "simd")]
 mod simd_kernel {
     use crate::error::LoessError;
     use crate::smoothing::loess::loess as scalar_loess;
@@ -251,5 +211,4 @@ mod simd_kernel {
     }
 }
 
-#[cfg(feature = "simd")]
 pub(crate) use simd_kernel::loess_batch_simd;

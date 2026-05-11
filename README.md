@@ -293,10 +293,9 @@ Full tables below.
 
 Decomposing 50 independent series at once. rust-stats parallelises over
 columns with rayon (`arrow_compat::*_batch`, `arrow` feature enabled);
-with the `simd` feature on (nightly only), `loess_batch` (degree 0/1)
-additionally runs through a `std::simd::f64x4` cross-column kernel —
-LLVM lowers it to NEON / AVX2 / scalar as appropriate. Without `simd`,
-`loess_batch` falls back to rayon-over-columns scalar LOESS.
+`loess_batch` (degree 0/1) additionally runs through a `pulp`-backed
+cross-column SIMD kernel — `pulp` selects SSE2 / AVX2 / AVX-512 on
+x86_64 or NEON on aarch64 at runtime, with a scalar fallback elsewhere.
 statsmodels has no native batched form, so the Python column is a
 straight Python loop over the same 50 series.
 
@@ -308,20 +307,14 @@ straight Python loop over the same 50 series.
 | `seasonal_decompose_batch` | 50 × n=720,   period=12 |   0.15 ms |    5.95 ms |    35.6 ms |
 | `seasonal_decompose_batch` | 50 × n=1 000, period=12 |   0.18 ms |    5.98 ms |    38.7 ms |
 | `seasonal_decompose_batch` | 50 × n=2 880, period=24 |   0.47 ms |    11.0 ms |    59.3 ms |
-| `loess_batch` (simd)       | 50 × n=1 000, span=0.3  |   1.7 ms |   381.5 ms |    82.0 ms |
-| `loess_batch` (simd)       | 50 × n=5 000, span=0.3  |  36.6 ms |  3914.1 ms |  2016.2 ms |
-
-`loess_batch` numbers are with the `simd` feature on; without it (stable
-Rust, no nightly), the rayon-only fallback runs at ~14 ms / ~330 ms — a
-factor of ~8× slower than the SIMD path, still ~30× faster than
-statsmodels.
+| `loess_batch`              | 50 × n=1 000, span=0.3  |   1.7 ms |   381.5 ms |    82.0 ms |
+| `loess_batch`              | 50 × n=5 000, span=0.3  |  36.6 ms |  3914.1 ms |  2016.2 ms |
 
 Reproduce with:
 
 ```sh
-cargo run --release --example bench                              # core benches
-cargo run --release --features arrow --example bench              # + batched (stable, scalar fallback)
-cargo +nightly run --release --features arrow,simd --example bench # + batched, SIMD on
+cargo run --release --example bench                  # core benches
+cargo run --release --features arrow --example bench # + batched (uses pulp SIMD)
 python3 tests/golden/bench_statsmodels.py
 Rscript tests/golden/bench_r.R
 ```

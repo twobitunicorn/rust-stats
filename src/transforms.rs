@@ -6,6 +6,11 @@
 //! corresponding output positions, but do not contaminate the
 //! aggregates themselves.
 //!
+//! `center`, `z_score`, and `min_max_scale` dispatch through `pulp` for
+//! runtime SIMD acceleration (SSE2 / AVX2 / AVX-512 on x86_64, NEON on
+//! aarch64; scalar fallback elsewhere). `box_cox` is scalar — its
+//! transcendental kernel (`ln` / `powf`) isn't in pulp's f64 vocabulary.
+//!
 //! Edge cases:
 //!
 //! - Empty input → empty output (no error).
@@ -17,70 +22,12 @@
 
 use crate::error::BoxCoxError;
 
-fn finite_mean(y: &[f64]) -> f64 {
-    let mut sum = 0.0;
-    let mut count = 0usize;
-    for &v in y {
-        if v.is_finite() {
-            sum += v;
-            count += 1;
-        }
-    }
-    if count == 0 {
-        0.0
-    } else {
-        sum / count as f64
-    }
-}
-
-/// Sample standard deviation (ddof = 1) over the finite entries.
-/// Returns `0.0` when fewer than two finite entries are present.
-fn finite_std_ddof1(y: &[f64], mean: f64) -> f64 {
-    let mut sum_sq = 0.0;
-    let mut count = 0usize;
-    for &v in y {
-        if v.is_finite() {
-            let d = v - mean;
-            sum_sq += d * d;
-            count += 1;
-        }
-    }
-    if count < 2 {
-        0.0
-    } else {
-        (sum_sq / (count - 1) as f64).sqrt()
-    }
-}
-
-fn finite_min_max(y: &[f64]) -> (f64, f64) {
-    let mut lo = f64::INFINITY;
-    let mut hi = f64::NEG_INFINITY;
-    let mut any = false;
-    for &v in y {
-        if v.is_finite() {
-            if v < lo {
-                lo = v;
-            }
-            if v > hi {
-                hi = v;
-            }
-            any = true;
-        }
-    }
-    if any {
-        (lo, hi)
-    } else {
-        (0.0, 0.0)
-    }
-}
-
 /// Subtract the (finite-entry) mean from every value.
 ///
 /// `NaN` inputs propagate to the same positions in the output. An
 /// all-NaN input is treated as having a mean of zero.
 pub fn center(y: &[f64]) -> Vec<f64> {
-    let mean = finite_mean(y);
-    y.iter().map(|&v| v - mean).collect()
+    pulp_impl::center(y)
 }
 
 /// Z-score normalisation: `(x - mean) / std` with sample standard
@@ -90,15 +37,7 @@ pub fn center(y: &[f64]) -> Vec<f64> {
 /// propagate. Constant inputs (and inputs with fewer than two finite
 /// entries) produce an all-zero output at finite positions.
 pub fn z_score(y: &[f64]) -> Vec<f64> {
-    let mean = finite_mean(y);
-    let std = finite_std_ddof1(y, mean);
-    if std == 0.0 {
-        // Match the centered * 0.0 behaviour: zeros at finite
-        // positions, NaN at NaN positions.
-        y.iter().map(|&v| (v - mean) * 0.0).collect()
-    } else {
-        y.iter().map(|&v| (v - mean) / std).collect()
-    }
+    pulp_impl::z_score(y)
 }
 
 /// Min-max rescaling into `[0, 1]`: `(x - min) / (max - min)`.
@@ -107,13 +46,7 @@ pub fn z_score(y: &[f64]) -> Vec<f64> {
 /// propagate. Constant inputs produce an all-zero output at finite
 /// positions.
 pub fn min_max_scale(y: &[f64]) -> Vec<f64> {
-    let (lo, hi) = finite_min_max(y);
-    let range = hi - lo;
-    if range == 0.0 {
-        y.iter().map(|&v| (v - lo) * 0.0).collect()
-    } else {
-        y.iter().map(|&v| (v - lo) / range).collect()
-    }
+    pulp_impl::min_max_scale(y)
 }
 
 /// Box-Cox power transformation with a fixed `lmbda`:
@@ -147,23 +80,113 @@ pub fn box_cox(y: &[f64], lmbda: f64) -> Result<Vec<f64>, BoxCoxError> {
 }
 
 // ============================================================================
+// Scalar reference implementations.
+//
+// Kept private and compiled only under `cfg(test)`: they exist solely as
+// an oracle for the pulp parity tests below. External callers always go
+// through the public functions, which dispatch to the pulp-backed
+// kernels.
+// ============================================================================
+
+#[cfg(test)]
+mod scalar {
+    fn finite_mean(y: &[f64]) -> f64 {
+        let mut sum = 0.0;
+        let mut count = 0usize;
+        for &v in y {
+            if v.is_finite() {
+                sum += v;
+                count += 1;
+            }
+        }
+        if count == 0 {
+            0.0
+        } else {
+            sum / count as f64
+        }
+    }
+
+    /// Sample standard deviation (ddof = 1) over the finite entries.
+    /// Returns `0.0` when fewer than two finite entries are present.
+    fn finite_std_ddof1(y: &[f64], mean: f64) -> f64 {
+        let mut sum_sq = 0.0;
+        let mut count = 0usize;
+        for &v in y {
+            if v.is_finite() {
+                let d = v - mean;
+                sum_sq += d * d;
+                count += 1;
+            }
+        }
+        if count < 2 {
+            0.0
+        } else {
+            (sum_sq / (count - 1) as f64).sqrt()
+        }
+    }
+
+    fn finite_min_max(y: &[f64]) -> (f64, f64) {
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        let mut any = false;
+        for &v in y {
+            if v.is_finite() {
+                if v < lo {
+                    lo = v;
+                }
+                if v > hi {
+                    hi = v;
+                }
+                any = true;
+            }
+        }
+        if any {
+            (lo, hi)
+        } else {
+            (0.0, 0.0)
+        }
+    }
+
+    pub(super) fn center(y: &[f64]) -> Vec<f64> {
+        let mean = finite_mean(y);
+        y.iter().map(|&v| v - mean).collect()
+    }
+
+    pub(super) fn z_score(y: &[f64]) -> Vec<f64> {
+        let mean = finite_mean(y);
+        let std = finite_std_ddof1(y, mean);
+        if std == 0.0 {
+            y.iter().map(|&v| (v - mean) * 0.0).collect()
+        } else {
+            y.iter().map(|&v| (v - mean) / std).collect()
+        }
+    }
+
+    pub(super) fn min_max_scale(y: &[f64]) -> Vec<f64> {
+        let (lo, hi) = finite_min_max(y);
+        let range = hi - lo;
+        if range == 0.0 {
+            y.iter().map(|&v| (v - lo) * 0.0).collect()
+        } else {
+            y.iter().map(|&v| (v - lo) / range).collect()
+        }
+    }
+}
+
+// ============================================================================
 // SIMD kernels — backed by `pulp` (stable Rust, runtime ISA dispatch).
 //
 // `pulp::Arch::new()` selects the best SIMD level at runtime (SSE2 /
 // AVX2 / AVX-512 on x86_64, NEON on aarch64, scalar fallback elsewhere).
 // `S::F64_LANES` is the lane count of the chosen target.
 //
-// All kernels preserve the scalar contracts: NaN inputs propagate to the
+// The kernels preserve the scalar contracts: NaN inputs propagate to the
 // same output positions, aggregates are computed over the finite entries
 // only, and degenerate inputs (empty / constant / fewer than two finite
 // values) produce the same zeros-or-NaN pattern as the scalar path.
-//
-// Transcendentals (`ln`, `pow`) are not part of pulp's f64 vocabulary,
-// so `box_cox` is not vectorised here.
 // ============================================================================
 
-#[cfg(feature = "simd")]
-mod simd_impl {
+mod pulp_impl {
     use pulp::{Arch, Simd, WithSimd};
 
     /// Lanewise `is_finite` mask: `abs(v) < +∞` is true for every finite
@@ -333,27 +356,6 @@ mod simd_impl {
     }
 }
 
-/// SIMD-accelerated [`center`]. Requires the `simd` feature (nightly).
-/// Numerically identical to the scalar implementation up to FP
-/// associativity in the SIMD reduction.
-#[cfg(feature = "simd")]
-pub fn center_simd(y: &[f64]) -> Vec<f64> {
-    simd_impl::center(y)
-}
-
-/// SIMD-accelerated [`z_score`]. Requires the `simd` feature (nightly).
-#[cfg(feature = "simd")]
-pub fn z_score_simd(y: &[f64]) -> Vec<f64> {
-    simd_impl::z_score(y)
-}
-
-/// SIMD-accelerated [`min_max_scale`]. Requires the `simd` feature
-/// (nightly).
-#[cfg(feature = "simd")]
-pub fn min_max_scale_simd(y: &[f64]) -> Vec<f64> {
-    simd_impl::min_max_scale(y)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -434,17 +436,15 @@ mod tests {
         assert_relative_eq!(out[2], 7.5);
     }
 
-    // --- SIMD parity ---
+    // --- Pulp vs. scalar parity ---
     //
-    // When the `simd` feature is on, the `_simd` kernels must produce
-    // bit-close output to the scalar kernels. We test on a mixed-size
-    // input that crosses the 4-lane boundary and includes NaN to
-    // exercise the masked finite reductions.
+    // The public functions go through pulp; the private `scalar` module
+    // is the oracle. Outputs must agree to ~1e-12 on a mixed-size input
+    // that crosses the SIMD lane boundary and includes NaN.
 
-    #[cfg(feature = "simd")]
-    fn parity_check(scalar: &[f64], simd: &[f64], ctx: &str) {
-        assert_eq!(scalar.len(), simd.len(), "{ctx}: length mismatch");
-        for (i, (a, b)) in scalar.iter().zip(simd.iter()).enumerate() {
+    fn parity_check(scalar_out: &[f64], simd_out: &[f64], ctx: &str) {
+        assert_eq!(scalar_out.len(), simd_out.len(), "{ctx}: length mismatch");
+        for (i, (a, b)) in scalar_out.iter().zip(simd_out.iter()).enumerate() {
             if a.is_nan() {
                 assert!(b.is_nan(), "{ctx}[{i}]: scalar NaN but simd {b}");
             } else {
@@ -457,62 +457,56 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "simd")]
     fn make_fixture() -> Vec<f64> {
-        // length 11 — guarantees a chunks_exact(4) remainder of 3
+        // length 11 — guarantees a remainder past any 2/4/8-lane SIMD chunk
         vec![
             1.0, -2.5, 3.25, f64::NAN, 5.5, 0.0, -7.125, 8.75,
             f64::NAN, 11.5, -3.0,
         ]
     }
 
-    #[cfg(feature = "simd")]
     #[test]
-    fn simd_center_matches_scalar() {
+    fn pulp_center_matches_scalar() {
         let y = make_fixture();
-        parity_check(&center(&y), &super::center_simd(&y), "center");
+        parity_check(&super::scalar::center(&y), &center(&y), "center");
     }
 
-    #[cfg(feature = "simd")]
     #[test]
-    fn simd_z_score_matches_scalar() {
+    fn pulp_z_score_matches_scalar() {
         let y = make_fixture();
-        parity_check(&z_score(&y), &super::z_score_simd(&y), "z_score");
+        parity_check(&super::scalar::z_score(&y), &z_score(&y), "z_score");
 
-        // Constant path: simd must also collapse to zeros.
+        // Constant path: pulp must also collapse to zeros.
         let constant = vec![4.2; 9];
         parity_check(
+            &super::scalar::z_score(&constant),
             &z_score(&constant),
-            &super::z_score_simd(&constant),
             "z_score constant",
         );
     }
 
-    #[cfg(feature = "simd")]
     #[test]
-    fn simd_min_max_matches_scalar() {
+    fn pulp_min_max_matches_scalar() {
         let y = make_fixture();
         parity_check(
+            &super::scalar::min_max_scale(&y),
             &min_max_scale(&y),
-            &super::min_max_scale_simd(&y),
             "min_max",
         );
     }
 
-    #[cfg(feature = "simd")]
     #[test]
-    fn simd_handles_empty_and_short_inputs() {
-        // empty
-        assert!(super::center_simd(&[]).is_empty());
-        assert!(super::z_score_simd(&[]).is_empty());
-        assert!(super::min_max_scale_simd(&[]).is_empty());
-        // shorter than one SIMD lane group
+    fn pulp_handles_empty_and_short_inputs() {
+        assert!(center(&[]).is_empty());
+        assert!(z_score(&[]).is_empty());
+        assert!(min_max_scale(&[]).is_empty());
+
         let y = vec![1.0, 2.0, 3.0];
-        parity_check(&center(&y), &super::center_simd(&y), "short center");
-        parity_check(&z_score(&y), &super::z_score_simd(&y), "short z_score");
+        parity_check(&super::scalar::center(&y), &center(&y), "short center");
+        parity_check(&super::scalar::z_score(&y), &z_score(&y), "short z_score");
         parity_check(
+            &super::scalar::min_max_scale(&y),
             &min_max_scale(&y),
-            &super::min_max_scale_simd(&y),
             "short min_max",
         );
     }

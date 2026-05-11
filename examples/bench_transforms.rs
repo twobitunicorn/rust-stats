@@ -5,20 +5,14 @@
 //!   - `tests/golden/bench_r.R`
 //!   - `tests/golden/bench_statsmodels.py`
 //!
-//! Run with (scalar only):
+//! Run with:
 //!
 //!   cargo run --release --example bench_transforms
 //!
-//! Or with the SIMD kernels (backed by `pulp`, stable Rust, runtime ISA
-//! dispatch):
-//!
-//!   cargo run --release --features simd --example bench_transforms
-//!
-//! With `--features simd`, each per-element transform is reported twice —
-//! `(scalar)` and `(simd)` — so the speedup is visible inline. Box-Cox
-//! and Holt-Winters stay scalar (powf / ln aren't part of `pulp`'s f64
-//! vocabulary, and Holt-Winters' recurrence has a hard data dependency
-//! between steps).
+//! `center`, `z_score`, and `min_max_scale` always go through the
+//! `pulp` SIMD kernels; Box-Cox and Holt-Winters are scalar (powf / ln
+//! aren't part of `pulp`'s f64 vocabulary, and Holt-Winters' recurrence
+//! has a hard data dependency between steps).
 
 use rust_stats::transforms::{box_cox, center, min_max_scale, z_score};
 use rust_stats::tsa::{holt_winters, DecomposeMode, HoltWintersOpts};
@@ -94,15 +88,7 @@ fn bench_center() {
         let secs = time_iters(iters, || {
             let _ = center(&y);
         });
-        report("center (scalar)", n, "", secs);
-
-        #[cfg(feature = "simd")]
-        {
-            let secs = time_iters(iters, || {
-                let _ = rust_stats::transforms::center_simd(&y);
-            });
-            report("center (simd)", n, "", secs);
-        }
+        report("center", n, "", secs);
     }
 }
 
@@ -117,15 +103,7 @@ fn bench_z_score() {
         let secs = time_iters(iters, || {
             let _ = z_score(&y);
         });
-        report("z_score (scalar)", n, "", secs);
-
-        #[cfg(feature = "simd")]
-        {
-            let secs = time_iters(iters, || {
-                let _ = rust_stats::transforms::z_score_simd(&y);
-            });
-            report("z_score (simd)", n, "", secs);
-        }
+        report("z_score", n, "", secs);
     }
 }
 
@@ -140,15 +118,7 @@ fn bench_min_max() {
         let secs = time_iters(iters, || {
             let _ = min_max_scale(&y);
         });
-        report("min_max_scale (scalar)", n, "", secs);
-
-        #[cfg(feature = "simd")]
-        {
-            let secs = time_iters(iters, || {
-                let _ = rust_stats::transforms::min_max_scale_simd(&y);
-            });
-            report("min_max_scale (simd)", n, "", secs);
-        }
+        report("min_max_scale", n, "", secs);
     }
 }
 
@@ -169,7 +139,7 @@ fn bench_box_cox() {
             let secs = time_iters(iters, || {
                 let _ = box_cox(&y, lmbda).unwrap();
             });
-            report("box_cox (scalar)", n, &format!("lambda={lmbda}"), secs);
+            report("box_cox", n, &format!("lambda={lmbda}"), secs);
         }
     }
 }
@@ -234,10 +204,7 @@ fn bench_holt_winters() {
 
 fn main() {
     println!("# rust-stats transforms + Holt-Winters benchmark");
-    #[cfg(feature = "simd")]
-    println!("# (simd feature enabled — pulp runtime ISA dispatch active)");
-    #[cfg(not(feature = "simd"))]
-    println!("# (simd feature off — scalar only)");
+    println!("# (pulp runtime ISA dispatch for center / z_score / min_max_scale)");
     println!();
     bench_center();
     println!();
