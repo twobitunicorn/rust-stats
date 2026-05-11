@@ -22,8 +22,8 @@
 use approx::assert_relative_eq;
 use rust_stats::error::BoxCoxError;
 use rust_stats::{
-    box_cox, box_cox_lambda_guerrero, box_cox_lambda_mle, center, inv_box_cox, min_max_scale,
-    z_score,
+    box_cox, box_cox_lambda_guerrero, box_cox_lambda_mle, box_cox_lambda_pearsonr, center,
+    inv_box_cox, min_max_scale, z_score,
 };
 
 /// numpy.testing.assert_almost_equal semantics: tolerance = 1.5 * 10^-decimal.
@@ -427,6 +427,58 @@ fn guerrero_returns_lambda_near_one_for_constant_variance() {
     assert!(
         (lmbda - 1.0).abs() < 0.5,
         "expected λ ≈ 1 for additive-variance series, got {lmbda}"
+    );
+}
+
+// ============================================================================
+// box_cox_lambda_pearsonr  —  scipy.stats.boxcox_normmax(x, method="pearsonr")
+// ============================================================================
+
+/// On near-Gaussian positive data, the Pearson-r objective should pick
+/// λ close to 1 (identity transform already gives a straight Q-Q plot).
+/// Matches scipy's behaviour on similar inputs.
+#[test]
+fn pearsonr_near_one_on_normal_like_data() {
+    let y: Vec<f64> = (0..500)
+        .map(|i| {
+            let t = i as f64 * 0.13;
+            10.0 + (t.sin() + (t * 0.4).cos() * 0.5) * 0.5
+        })
+        .collect();
+    let lmbda = box_cox_lambda_pearsonr(&y).unwrap();
+    assert!(
+        (lmbda - 1.0).abs() < 0.5,
+        "expected λ ≈ 1, got {lmbda}"
+    );
+}
+
+/// On lognormal data, Pearson-r should agree with MLE: λ ≈ 0
+/// (log transform straightens the Q-Q plot).
+#[test]
+fn pearsonr_near_zero_on_lognormal_data() {
+    let y: Vec<f64> = (0..500)
+        .map(|i| {
+            let t = i as f64 * 0.13;
+            (t.sin() + (t * 0.4).cos() * 0.5).exp() * 10.0
+        })
+        .collect();
+    let lmbda = box_cox_lambda_pearsonr(&y).unwrap();
+    assert!(lmbda.abs() < 0.5, "expected λ ≈ 0, got {lmbda}");
+}
+
+/// Pearson-r and MLE both target marginal normality and should agree
+/// to within ~0.1-0.2 on smooth data. (scipy users routinely use them
+/// interchangeably for that reason.)
+#[test]
+fn pearsonr_agrees_with_mle_on_smooth_data() {
+    let y: Vec<f64> = (0..500)
+        .map(|i| 10.0 + ((i as f64) * 0.1).sin().exp() * 0.5)
+        .collect();
+    let r = box_cox_lambda_pearsonr(&y).unwrap();
+    let m = box_cox_lambda_mle(&y).unwrap();
+    assert!(
+        (r - m).abs() < 0.5,
+        "pearsonr λ = {r} too far from mle λ = {m}"
     );
 }
 

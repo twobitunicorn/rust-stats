@@ -10,7 +10,8 @@
 //!   cargo run --release --example box_cox_workflow
 
 use rust_stats::{
-    arima, box_cox, box_cox_lambda_guerrero, inv_box_cox, ArimaOpts,
+    arima, box_cox, box_cox_lambda_guerrero, box_cox_lambda_mle, box_cox_lambda_pearsonr,
+    inv_box_cox, ArimaOpts,
 };
 
 fn main() {
@@ -32,11 +33,25 @@ fn main() {
         y.iter().copied().fold(f64::NEG_INFINITY, f64::max),
     );
 
-    // ── 2. Pick λ that stabilises the within-cycle variance. ────────
-    //    Guerrero is the seasonal-aware estimator. For a non-seasonal
-    //    series, swap in `box_cox_lambda_mle(&y)` instead.
-    let lambda = box_cox_lambda_guerrero(&y, m).unwrap();
-    println!("\nGuerrero λ = {:.3}", lambda);
+    // ── 2. Compare the three λ estimators side by side. ─────────────
+    //    - Guerrero: minimises CV of σ_b / μ_b^(1-λ) within cycles —
+    //      stabilises seasonal variance. Use this for forecasting.
+    //    - MLE / loglik: maximises Gaussian log-likelihood of the
+    //      transformed series — targets marginal normality.
+    //    - Pearson r: maximises the Q-Q correlation of the
+    //      transformed values against theoretical normal quantiles —
+    //      same goal as MLE but rank-based, so more robust to outliers.
+    let lambda_guerrero = box_cox_lambda_guerrero(&y, m).unwrap();
+    let lambda_mle = box_cox_lambda_mle(&y).unwrap();
+    let lambda_pearson = box_cox_lambda_pearsonr(&y).unwrap();
+    println!("\nλ comparison:");
+    println!("  Guerrero  = {:.3}   (variance stabilisation)", lambda_guerrero);
+    println!("  MLE       = {:.3}   (marginal Gaussianity, full likelihood)", lambda_mle);
+    println!("  Pearson r = {:.3}   (marginal Gaussianity, rank-based)", lambda_pearson);
+
+    // For a forecasting workflow on a seasonal series, prefer Guerrero:
+    let lambda = lambda_guerrero;
+    println!("\nUsing Guerrero λ = {:.3} for the SARIMA fit.", lambda);
 
     // ── 3. Transform y → z on a stabilised scale. ───────────────────
     let z = box_cox(&y, lambda).unwrap();
