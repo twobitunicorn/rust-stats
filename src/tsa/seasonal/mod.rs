@@ -29,6 +29,66 @@ pub enum DecomposeMode {
     Multiplicative,
 }
 
+/// Policy for handling non-finite (NaN / ±Inf) entries in the input.
+///
+/// `Error` (default) preserves the existing behaviour: any non-finite
+/// value returns `NonFinite`. `Interpolate` fills non-finite entries via
+/// linear interpolation between adjacent finite values (leading/trailing
+/// runs are filled with the nearest finite value), runs the decomposition
+/// on the filled series, and propagates `NaN` back into the residual at
+/// originally-missing positions. The trend and seasonal stay finite
+/// everywhere — they are the model's estimates at the imputed points.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Missing {
+    #[default]
+    Error,
+    Interpolate,
+}
+
+/// Linearly interpolate non-finite values in `y`. Leading and trailing
+/// runs of non-finite values are filled with the nearest finite value;
+/// interior runs are filled by linear interpolation between the
+/// surrounding finite endpoints. Returns `None` if `y` has no finite
+/// values.
+pub(crate) fn interpolate_missing(y: &[f64]) -> Option<Vec<f64>> {
+    let n = y.len();
+    let first = y.iter().position(|v| v.is_finite())?;
+    let last = y.iter().rposition(|v| v.is_finite()).expect("first exists ⇒ last exists");
+
+    let mut out = y.to_vec();
+    let lead = out[first];
+    for slot in out.iter_mut().take(first) {
+        *slot = lead;
+    }
+    let tail = out[last];
+    for slot in out.iter_mut().take(n).skip(last + 1) {
+        *slot = tail;
+    }
+
+    let mut i = first + 1;
+    while i < last {
+        if out[i].is_finite() {
+            i += 1;
+            continue;
+        }
+        // Find next finite index j > i (must exist before `last` since
+        // out[last] is finite).
+        let mut j = i + 1;
+        while !out[j].is_finite() {
+            j += 1;
+        }
+        let lo = out[i - 1];
+        let hi = out[j];
+        let gap = (j - (i - 1)) as f64;
+        for k in i..j {
+            let alpha = (k - (i - 1)) as f64 / gap;
+            out[k] = lo + alpha * (hi - lo);
+        }
+        i = j + 1;
+    }
+    Some(out)
+}
+
 /// Options for `stl`. Construct via `StlOpts::new(period)` for Cleveland
 /// defaults and override individual fields with struct-update syntax.
 #[derive(Debug, Clone)]
@@ -61,6 +121,8 @@ pub struct StlOpts {
     pub trend_jump: u32,
     /// Jump parameter for the low-pass LOESS. Must be `>= 1`; `1` is exact.
     pub low_pass_jump: u32,
+    /// How to handle non-finite values in the input. Defaults to `Error`.
+    pub missing: Missing,
 }
 
 impl StlOpts {
@@ -75,6 +137,7 @@ impl StlOpts {
             seasonal_jump: 1,
             trend_jump: 1,
             low_pass_jump: 1,
+            missing: Missing::Error,
         }
     }
 }
@@ -85,6 +148,8 @@ impl StlOpts {
 pub struct SeasonalDecomposeOpts {
     pub period: u32,
     pub mode: DecomposeMode,
+    /// How to handle non-finite values in the input. Defaults to `Error`.
+    pub missing: Missing,
 }
 
 impl SeasonalDecomposeOpts {
@@ -92,6 +157,7 @@ impl SeasonalDecomposeOpts {
         Self {
             period,
             mode: DecomposeMode::Additive,
+            missing: Missing::Error,
         }
     }
 }

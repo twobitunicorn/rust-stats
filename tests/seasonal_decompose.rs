@@ -2,7 +2,7 @@
 
 use approx::assert_relative_eq;
 use rust_stats::error::SeasonalDecomposeError;
-use rust_stats::tsa::{seasonal_decompose, DecomposeMode, SeasonalDecomposeOpts};
+use rust_stats::tsa::{seasonal_decompose, DecomposeMode, Missing, SeasonalDecomposeOpts};
 
 #[test]
 fn linear_trend_recovered_in_inner_band() {
@@ -115,6 +115,76 @@ fn validation_paths() {
     v[5] = f64::NAN;
     assert!(matches!(
         seasonal_decompose(&v, SeasonalDecomposeOpts::new(4)),
+        Err(SeasonalDecomposeError::NonFinite)
+    ));
+}
+
+// ── Missing handling ─────────────────────────────────────────────────────
+
+fn airpassengers_like(n: usize, period: usize) -> Vec<f64> {
+    (0..n)
+        .map(|i| {
+            let phase = 2.0 * std::f64::consts::PI * (i % period) as f64 / period as f64;
+            100.0 + 0.5 * i as f64 + 30.0 * phase.sin()
+        })
+        .collect()
+}
+
+#[test]
+fn missing_interpolate_fills_residual_nan() {
+    let period = 12;
+    let n = 144;
+    let mut y = airpassengers_like(n, period);
+    y[50] = f64::NAN;
+    y[51] = f64::NAN;
+    y[100] = f64::INFINITY;
+
+    let opts = SeasonalDecomposeOpts {
+        missing: Missing::Interpolate,
+        ..SeasonalDecomposeOpts::new(period as u32)
+    };
+    let d = seasonal_decompose(&y, opts).unwrap();
+    let half = period / 2;
+
+    for i in 0..n {
+        let in_edge = i < half || i >= n - half;
+        // Trend NaN at edges (centred MA), finite elsewhere.
+        if in_edge {
+            assert!(d.trend[i].is_nan(), "trend at edge i={i} should be NaN");
+        } else {
+            assert!(d.trend[i].is_finite(), "trend at i={i} should be finite, got {}", d.trend[i]);
+        }
+        // Seasonal always finite.
+        assert!(d.seasonal[i].is_finite(), "seasonal at i={i} should be finite");
+        // Residual NaN at edges AND at originally-missing positions; finite elsewhere.
+        let was_missing = !y[i].is_finite();
+        if in_edge || was_missing {
+            assert!(d.residual[i].is_nan(), "residual at i={i} should be NaN (edge={in_edge}, missing={was_missing})");
+        } else {
+            assert!(d.residual[i].is_finite(), "residual at i={i} should be finite");
+        }
+    }
+}
+
+#[test]
+fn missing_error_still_default() {
+    let mut y = airpassengers_like(48, 4);
+    y[10] = f64::NAN;
+    assert!(matches!(
+        seasonal_decompose(&y, SeasonalDecomposeOpts::new(4)),
+        Err(SeasonalDecomposeError::NonFinite)
+    ));
+}
+
+#[test]
+fn missing_interpolate_all_nan_errors() {
+    let y = vec![f64::NAN; 48];
+    let opts = SeasonalDecomposeOpts {
+        missing: Missing::Interpolate,
+        ..SeasonalDecomposeOpts::new(4)
+    };
+    assert!(matches!(
+        seasonal_decompose(&y, opts),
         Err(SeasonalDecomposeError::NonFinite)
     ));
 }

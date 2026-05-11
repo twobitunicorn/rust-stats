@@ -2,7 +2,7 @@
 
 use approx::assert_relative_eq;
 use rust_stats::error::StlError;
-use rust_stats::tsa::{stl, DecomposeMode, StlOpts};
+use rust_stats::tsa::{stl, DecomposeMode, Missing, StlOpts};
 
 #[test]
 fn pure_linear_trend_recovered_everywhere() {
@@ -331,4 +331,58 @@ fn robust_outer_loop_downweights_outliers() {
             "robust residual at outlier i={i} should be large, got {}", robust_d.residual[i]
         );
     }
+}
+
+// ── Missing handling ─────────────────────────────────────────────────────
+
+#[test]
+fn missing_interpolate_fills_residual_nan() {
+    let period = 12;
+    let n = 144;
+    let mut y = airpassengers_like(n, period);
+    y[20] = f64::NAN;
+    y[21] = f64::NAN;
+    y[80] = f64::INFINITY;
+
+    let opts = StlOpts {
+        missing: Missing::Interpolate,
+        ..StlOpts::new(period as u32)
+    };
+    let d = stl(&y, opts).unwrap();
+
+    for i in 0..n {
+        // STL produces finite trend/seasonal everywhere — even at imputed
+        // positions, they're the model's estimates.
+        assert!(d.trend[i].is_finite(), "trend at i={i} should be finite");
+        assert!(d.seasonal[i].is_finite(), "seasonal at i={i} should be finite");
+        let was_missing = !y[i].is_finite();
+        if was_missing {
+            assert!(d.residual[i].is_nan(), "residual at originally-missing i={i} should be NaN");
+        } else {
+            assert!(d.residual[i].is_finite(), "residual at i={i} should be finite");
+            // Reconstruction holds at non-missing positions.
+            assert_relative_eq!(
+                d.trend[i] + d.seasonal[i] + d.residual[i],
+                y[i],
+                epsilon = 1e-10
+            );
+        }
+    }
+}
+
+#[test]
+fn missing_error_still_default() {
+    let mut y = airpassengers_like(48, 4);
+    y[10] = f64::NAN;
+    assert!(matches!(stl(&y, StlOpts::new(4)), Err(StlError::NonFinite)));
+}
+
+#[test]
+fn missing_interpolate_all_nan_errors() {
+    let y = vec![f64::NAN; 48];
+    let opts = StlOpts {
+        missing: Missing::Interpolate,
+        ..StlOpts::new(4)
+    };
+    assert!(matches!(stl(&y, opts), Err(StlError::NonFinite)));
 }

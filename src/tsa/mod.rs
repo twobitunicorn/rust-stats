@@ -3,5 +3,6 @@
 pub mod seasonal;
 
 pub use seasonal::{
-    seasonal_decompose, stl, DecomposeMode, Decomposition, SeasonalDecomposeOpts, StlOpts,
+    seasonal_decompose, stl, DecomposeMode, Decomposition, Missing, SeasonalDecomposeOpts,
+    StlOpts,
 };

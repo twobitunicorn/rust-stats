@@ -16,7 +16,7 @@ use crate::smoothing::loess::{
     local_poly_fit_at_xf64_weighted, loess_compute_with_jump,
     loess_compute_with_jump_weighted,
 };
-use crate::tsa::seasonal::{DecomposeMode, Decomposition, StlOpts};
+use crate::tsa::seasonal::{interpolate_missing, DecomposeMode, Decomposition, Missing, StlOpts};
 
 /// Cleveland 1990 STL.
 ///
@@ -76,10 +76,28 @@ pub fn stl(y: &[f64], opts: StlOpts) -> Result<Decomposition, StlError> {
         });
     }
 
-    let raw: Vec<f64> = y.to_vec();
-    if raw.iter().any(|v| !v.is_finite()) {
-        return Err(StlError::NonFinite);
-    }
+    // Track originally-missing positions so we can NaN out the residual
+    // there on output. None when no imputation happened.
+    let mut missing_mask: Option<Vec<bool>> = None;
+    let raw: Vec<f64> = match opts.missing {
+        Missing::Error => {
+            if y.iter().any(|v| !v.is_finite()) {
+                return Err(StlError::NonFinite);
+            }
+            y.to_vec()
+        }
+        Missing::Interpolate => {
+            let any_missing = y.iter().any(|v| !v.is_finite());
+            if any_missing {
+                let mask: Vec<bool> = y.iter().map(|v| !v.is_finite()).collect();
+                let filled = interpolate_missing(y).ok_or(StlError::NonFinite)?;
+                missing_mask = Some(mask);
+                filled
+            } else {
+                y.to_vec()
+            }
+        }
+    };
     let n = raw.len();
 
     if n < 2 * period {
@@ -130,7 +148,7 @@ pub fn stl(y: &[f64], opts: StlOpts) -> Result<Decomposition, StlError> {
         pass += 1;
     }
 
-    let (trend, seasonal, residual) = if multiplicative {
+    let (trend, seasonal, mut residual) = if multiplicative {
         (
             trend.into_iter().map(|v| v.exp()).collect::<Vec<_>>(),
             seasonal.into_iter().map(|v| v.exp()).collect::<Vec<_>>(),
@@ -139,6 +157,14 @@ pub fn stl(y: &[f64], opts: StlOpts) -> Result<Decomposition, StlError> {
     } else {
         (trend, seasonal, residual)
     };
+
+    if let Some(mask) = missing_mask {
+        for (i, &missing) in mask.iter().enumerate() {
+            if missing {
+                residual[i] = f64::NAN;
+            }
+        }
+    }
 
     let _ = n;
     Ok(Decomposition {

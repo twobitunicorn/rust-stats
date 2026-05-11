@@ -13,5 +13,6 @@ pub mod arrow_compat;
 pub use error::{LoessError, SeasonalDecomposeError, StlError};
 pub use smoothing::{loess, loess_at};
 pub use tsa::{
-    seasonal_decompose, stl, DecomposeMode, Decomposition, SeasonalDecomposeOpts, StlOpts,
+    seasonal_decompose, stl, DecomposeMode, Decomposition, Missing, SeasonalDecomposeOpts,
+    StlOpts,
 };

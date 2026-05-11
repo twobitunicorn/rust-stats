@@ -15,7 +15,9 @@
 //! (the centred moving-average edge band).
 
 use crate::error::SeasonalDecomposeError;
-use crate::tsa::seasonal::{DecomposeMode, Decomposition, SeasonalDecomposeOpts};
+use crate::tsa::seasonal::{
+    interpolate_missing, DecomposeMode, Decomposition, Missing, SeasonalDecomposeOpts,
+};
 
 pub fn seasonal_decompose(
     y: &[f64],
@@ -32,10 +34,27 @@ pub fn seasonal_decompose(
             min: 2 * period,
         });
     }
-    let raw: Vec<f64> = y.to_vec();
-    if raw.iter().any(|v| !v.is_finite()) {
-        return Err(SeasonalDecomposeError::NonFinite);
-    }
+    let mut missing_mask: Option<Vec<bool>> = None;
+    let raw: Vec<f64> = match opts.missing {
+        Missing::Error => {
+            if y.iter().any(|v| !v.is_finite()) {
+                return Err(SeasonalDecomposeError::NonFinite);
+            }
+            y.to_vec()
+        }
+        Missing::Interpolate => {
+            let any_missing = y.iter().any(|v| !v.is_finite());
+            if any_missing {
+                let mask: Vec<bool> = y.iter().map(|v| !v.is_finite()).collect();
+                let filled = interpolate_missing(y)
+                    .ok_or(SeasonalDecomposeError::NonFinite)?;
+                missing_mask = Some(mask);
+                filled
+            } else {
+                y.to_vec()
+            }
+        }
+    };
     let n = raw.len();
     if n < 2 * period {
         return Err(SeasonalDecomposeError::SeriesTooShort {
@@ -99,7 +118,7 @@ pub fn seasonal_decompose(
 
     let seasonal: Vec<f64> = (0..n).map(|i| centered_pattern[i % period]).collect();
 
-    let residual: Vec<f64> = (0..n)
+    let mut residual: Vec<f64> = (0..n)
         .map(|i| {
             if trend[i].is_nan() {
                 f64::NAN
@@ -110,6 +129,14 @@ pub fn seasonal_decompose(
             }
         })
         .collect();
+
+    if let Some(mask) = missing_mask {
+        for (i, &missing) in mask.iter().enumerate() {
+            if missing {
+                residual[i] = f64::NAN;
+            }
+        }
+    }
 
     let _ = n;
     Ok(Decomposition {
