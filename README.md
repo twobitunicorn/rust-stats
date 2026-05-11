@@ -90,6 +90,15 @@ batched variants (`stl_batch`, `loess_batch`, `seasonal_decompose_batch`)
   to trade accuracy for speed (Cleveland 1990, §3).
 - **seasonal_decompose** — classical centered moving-average decomposition,
   additive and multiplicative, matching statsmodels exactly.
+- **ARIMA / SARIMA / ARIMAX** — full ARIMA(p, d, q) and seasonal
+  SARIMA(p, d, q)(P, D, Q)[m] with optional exogenous regressors;
+  three estimation paths (CSS, Kalman MLE, CSS-ML), point forecasts,
+  and Gaussian prediction intervals.
+- **Holt-Winters** — additive and multiplicative exponential smoothing
+  with caller-supplied α, β, γ.
+- **Transforms** — `center`, `z_score`, `min_max_scale`, `box_cox`;
+  the three reductions go through a `pulp` runtime-dispatched SIMD
+  kernel on stable Rust.
 - **Apache Arrow interop** (optional, `arrow` feature) — thin adapters so
   the same routines accept `Float64Array` / `RecordBatch` and return
   Arrow outputs.
@@ -258,6 +267,8 @@ Single-series, large n:
 | LOESS                  | n=5 000              | **7.9** | 79.6 | 40.1 |
 | STL                    | n=2 880, period=24   | **1.7** | 11.7 |  2.4 |
 | seasonal_decompose     | n=2 880              | **0.02** |  0.22 |  1.19 |
+| ARIMA(1,1,1) MLE       | n=2 880              | **12.1** | 57.2 | – |
+| SARIMA airline MLE     | n=288, m=12          | **125.7** | 285.6 | – |
 
 Batched, 50 series at a time:
 
@@ -288,6 +299,58 @@ Full tables below.
 | seasonal_decompose (×)    | n=144,  period=12  | 0.001 ms | 0.120 ms |    0.562 ms |
 | seasonal_decompose (×)    | n=720,  period=12  | 0.005 ms | 0.129 ms |    0.678 ms |
 | seasonal_decompose (×)    | n=2 880, period=24 | 0.024 ms | 0.227 ms |    1.108 ms |
+
+### ARIMA / SARIMA
+
+Three estimation methods are exposed via `ArimaOpts.method`:
+
+- **CSS** — Conditional Sum of Squares (default). Skips the Kalman filter
+  entirely; minimises squared one-step prediction errors with the
+  recursion conditioned on zero pre-sample innovations.
+- **MLE** — Exact Gaussian likelihood via Kalman filter on a Harvey 1989
+  state-space form. Same objective as statsmodels' `SARIMAX.fit()`.
+- **CSS-ML** — CSS for initial values, then MLE refinement. R's
+  `arima(method = "CSS-ML")` default.
+
+statsmodels' SARIMAX has no plain-CSS option; everything goes through
+Kalman + L-BFGS. So **rust-stats MLE vs statsmodels** is the strict
+like-for-like comparison; CSS is reported separately because it's a
+different (faster, slightly less efficient at finite n) estimator.
+
+| Workload | n | rust CSS | rust MLE | rust CSS-ML | statsmodels |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| ARIMA(1,0,0) | 144  | **0.07** |  0.55 |  0.43 |   5.06 |
+| ARIMA(1,0,0) | 720  | **0.11** |  1.13 |  0.97 |  14.71 |
+| ARIMA(1,0,0) | 2 880 | **0.27** |  3.56 |  3.74 |  44.86 |
+| ARIMA(0,0,1) | 144  | **0.05** |  0.30 |  0.31 |   5.45 |
+| ARIMA(0,0,1) | 720  | **0.22** |  1.28 |  1.49 |  17.97 |
+| ARIMA(0,0,1) | 2 880 | **0.91** |  5.34 |  5.90 |  56.16 |
+| ARIMA(1,0,1) | 144  | **0.10** |  0.65 |  0.74 |   7.95 |
+| ARIMA(1,0,1) | 720  | **0.46** |  2.73 |  3.30 |  22.61 |
+| ARIMA(1,0,1) | 2 880 | **1.80** | 11.43 | 12.63 |  76.93 |
+| ARIMA(0,1,1) | 144  | **0.05** |  0.28 |  0.29 |   3.70 |
+| ARIMA(0,1,1) | 720  | **0.22** |  1.21 |  1.47 |  10.43 |
+| ARIMA(0,1,1) | 2 880 | **0.86** |  4.89 |  5.44 |  27.75 |
+| ARIMA(1,1,1) | 144  | **0.12** |  0.76 |  0.81 |   7.42 |
+| ARIMA(1,1,1) | 720  | **0.54** |  2.83 |  3.70 |  17.23 |
+| ARIMA(1,1,1) | 2 880 | **2.09** | 12.08 | 14.12 |  57.21 |
+| SARIMA(0,1,1)(0,1,1)[12] | 144 | **0.32** |  62.65 |  70.21 | 214.37 |
+| SARIMA(0,1,1)(0,1,1)[12] | 288 | **0.69** | 125.68 |  95.91 | 285.61 |
+
+(All times in ms, median of 5–50 iters.)
+
+**Like-for-like (Kalman MLE)**: rust-stats is **3–18× faster** than
+statsmodels across every workload, with the largest gap on short
+non-seasonal series. **CSS path**: **30–410× faster**, with the biggest
+multiplier on SARIMA — at n=288 the airline model fits in 0.69 ms with
+CSS vs 286 ms in statsmodels, a 414× speedup.
+
+Reproduce with:
+
+```sh
+cargo run --release --example bench_arima
+python3 tests/golden/bench_arima_statsmodels.py
+```
 
 ### Batched (50 series per call)
 
