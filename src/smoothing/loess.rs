@@ -141,16 +141,26 @@ pub(crate) fn local_poly_fit_at_xf64(
     k: usize,
     degree: usize,
 ) -> f64 {
+    local_poly_fit_at_xf64_weighted(y, xq, k, degree, None)
+}
+
+/// Variant of `local_poly_fit_at_xf64` that folds an external per-point
+/// weight vector into the tricube distance weights. Used by STL's robust
+/// outer loop (Cleveland 1990 §3.5): the bisquare robustness weights
+/// downweight outliers at each LOESS fit.
+pub(crate) fn local_poly_fit_at_xf64_weighted(
+    y: &[f64],
+    xq: f64,
+    k: usize,
+    degree: usize,
+    weights: Option<&[f64]>,
+) -> f64 {
     let n = y.len();
     if n == 0 {
         return f64::NAN;
     }
     let (lo, hi) = loess_window(n, xq, k);
 
-    // Furthest distance from xq to any window point. Bumped by 1 so the
-    // boundary point doesn't get exactly zero weight, which preserves
-    // (degree+1) effective points and keeps the normal-equations matrix
-    // non-singular for centred windows.
     let max_dist = {
         let left = (xq - lo as f64).abs();
         let right = ((hi - 1) as f64 - xq).abs();
@@ -160,17 +170,25 @@ pub(crate) fn local_poly_fit_at_xf64(
     let m = degree + 1;
     let nearest_idx = || -> usize { xq.round().max(0.0).min((n - 1) as f64) as usize };
 
+    let tricube = |i: usize| -> f64 {
+        let d = (i as f64 - xq).abs() / max_dist;
+        let w_tri = if d >= 1.0 {
+            0.0
+        } else {
+            let u = 1.0 - d * d * d;
+            u * u * u
+        };
+        match weights {
+            Some(w) => w_tri * w[i],
+            None => w_tri,
+        }
+    };
+
     if degree == 0 {
         let mut wsum = 0.0;
         let mut wysum = 0.0;
         for i in lo..hi {
-            let d = (i as f64 - xq).abs() / max_dist;
-            let w = if d >= 1.0 {
-                0.0
-            } else {
-                let u = 1.0 - d * d * d;
-                u * u * u
-            };
+            let w = tricube(i);
             wsum += w;
             wysum += w * y[i];
         }
@@ -185,13 +203,7 @@ pub(crate) fn local_poly_fit_at_xf64(
     let mut wsum = 0.0;
     for i in lo..hi {
         let dx = i as f64 - xq;
-        let abs_d = dx.abs() / max_dist;
-        let w = if abs_d >= 1.0 {
-            0.0
-        } else {
-            let u = 1.0 - abs_d * abs_d * abs_d;
-            u * u * u
-        };
+        let w = tricube(i);
         if w == 0.0 {
             continue;
         }
@@ -217,16 +229,11 @@ pub(crate) fn local_poly_fit_at_xf64(
     match gauss_solve_n(m, xtwx, xtwy) {
         Some(coefs) => coefs[0],
         None => {
+            // Fallback to weighted mean.
             let mut wsum = 0.0;
             let mut wysum = 0.0;
             for i in lo..hi {
-                let d = (i as f64 - xq).abs() / max_dist;
-                let w = if d >= 1.0 {
-                    0.0
-                } else {
-                    let u = 1.0 - d * d * d;
-                    u * u * u
-                };
+                let w = tricube(i);
                 wsum += w;
                 wysum += w * y[i];
             }
@@ -239,9 +246,16 @@ pub(crate) fn local_poly_fit_at_xf64(
     }
 }
 
-/// Integer-index convenience wrapper for `local_poly_fit_at_xf64`.
-pub(crate) fn local_poly_fit_at(y: &[f64], xq: usize, k: usize, degree: usize) -> f64 {
-    local_poly_fit_at_xf64(y, xq as f64, k, degree)
+/// Integer-index convenience wrapper for the weighted fit (with
+/// `weights = None` matching the unweighted form bitwise).
+pub(crate) fn local_poly_fit_at_weighted(
+    y: &[f64],
+    xq: usize,
+    k: usize,
+    degree: usize,
+    weights: Option<&[f64]>,
+) -> f64 {
+    local_poly_fit_at_xf64_weighted(y, xq as f64, k, degree, weights)
 }
 
 /// LOESS smoother that takes an integer window directly. Used by `loess`
@@ -262,6 +276,19 @@ pub(crate) fn loess_compute_with_jump(
     degree: usize,
     jump: usize,
 ) -> Vec<f64> {
+    loess_compute_with_jump_weighted(y, window, degree, jump, None)
+}
+
+/// Jump-aware LOESS with optional per-point robustness weights folded
+/// into each LOESS fit. `weights = None` is equivalent to
+/// `loess_compute_with_jump` and reproduces it bitwise.
+pub(crate) fn loess_compute_with_jump_weighted(
+    y: &[f64],
+    window: usize,
+    degree: usize,
+    jump: usize,
+    weights: Option<&[f64]>,
+) -> Vec<f64> {
     let n = y.len();
     if n == 0 {
         return Vec::new();
@@ -269,16 +296,16 @@ pub(crate) fn loess_compute_with_jump(
     let k = window.max(degree + 2).min(n);
     let jump = jump.max(1);
 
-    // For jump=1 we fit at every point; small-n falls below the rayon
-    // crossover even for jump>1 because the fit-point count drops further.
     if jump == 1 {
         return if n >= 256 {
             (0..n)
                 .into_par_iter()
-                .map(|i| local_poly_fit_at(y, i, k, degree))
+                .map(|i| local_poly_fit_at_weighted(y, i, k, degree, weights))
                 .collect()
         } else {
-            (0..n).map(|i| local_poly_fit_at(y, i, k, degree)).collect()
+            (0..n)
+                .map(|i| local_poly_fit_at_weighted(y, i, k, degree, weights))
+                .collect()
         };
     }
 
@@ -286,12 +313,12 @@ pub(crate) fn loess_compute_with_jump(
     let fit_vals: Vec<f64> = if fit_at.len() >= 64 {
         fit_at
             .par_iter()
-            .map(|&i| local_poly_fit_at(y, i, k, degree))
+            .map(|&i| local_poly_fit_at_weighted(y, i, k, degree, weights))
             .collect()
     } else {
         fit_at
             .iter()
-            .map(|&i| local_poly_fit_at(y, i, k, degree))
+            .map(|&i| local_poly_fit_at_weighted(y, i, k, degree, weights))
             .collect()
     };
 

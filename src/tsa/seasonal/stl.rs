@@ -12,7 +12,10 @@
 //! Multiplicative mode: log-transform → additive STL → exp components.
 
 use crate::error::StlError;
-use crate::smoothing::loess::{local_poly_fit_at_xf64, loess_compute_with_jump};
+use crate::smoothing::loess::{
+    local_poly_fit_at_xf64_weighted, loess_compute_with_jump,
+    loess_compute_with_jump_weighted,
+};
 use crate::tsa::seasonal::{DecomposeMode, Decomposition, StlOpts};
 
 /// Cleveland 1990 STL.
@@ -100,14 +103,32 @@ pub fn stl(y: &[f64], opts: StlOpts) -> Result<Decomposition, StlError> {
         raw
     };
 
-    let (trend, seasonal) = stl_inner_loop(
-        &work, period, n_s, n_l, n_t, n_i,
-        seasonal_jump, trend_jump, low_pass_jump,
-    );
-
-    let residual: Vec<f64> = (0..n)
-        .map(|i| work[i] - trend[i] - seasonal[i])
-        .collect();
+    // Outer loop: outer_iters + 1 inner passes total. First pass uses
+    // all-1 weights (= the non-robust case when outer_iters == 0). After
+    // each pass, recompute robustness weights from residuals and fold
+    // them into the next inner pass.
+    let n_o = opts.outer_iters as usize;
+    let mut weights: Vec<f64> = vec![1.0; n];
+    let mut trend: Vec<f64>;
+    let mut seasonal: Vec<f64>;
+    let mut residual: Vec<f64>;
+    let mut pass = 0;
+    loop {
+        let w_ref: Option<&[f64]> = if pass == 0 { None } else { Some(&weights) };
+        let (t, s) = stl_inner_loop(
+            &work, period, n_s, n_l, n_t, n_i,
+            seasonal_jump, trend_jump, low_pass_jump,
+            w_ref,
+        );
+        trend = t;
+        seasonal = s;
+        residual = (0..n).map(|i| work[i] - trend[i] - seasonal[i]).collect();
+        if pass == n_o {
+            break;
+        }
+        weights = robust_weights(&residual);
+        pass += 1;
+    }
 
     let (trend, seasonal, residual) = if multiplicative {
         (
@@ -156,16 +177,18 @@ fn valid_ma(y: &[f64], window: usize) -> Vec<f64> {
     out
 }
 
-/// Cycle-subseries smoothing — Step 2 of STL. The within-subseries LOESS
-/// fit can be approximated by fitting at every `jump`-th point and
-/// linearly interpolating between fit points; `jump = 1` is exact. The
-/// two boundary extrapolation points (one each end) are always exact.
+/// Cycle-subseries smoothing — Step 2 of STL. Within-subseries LOESS
+/// fits can use Cleveland's `jump` approximation and accept per-point
+/// robustness weights (for the outer loop). `weights = None` is exact
+/// and reproduces the non-robust path bitwise.
+#[allow(clippy::too_many_arguments)]
 fn cycle_subseries_smooth(
     d: &[f64],
     period: usize,
     span: usize,
     degree: usize,
     jump: usize,
+    weights: Option<&[f64]>,
 ) -> Vec<f64> {
     let n = d.len();
     let mut c = vec![0.0; n + 2 * period];
@@ -178,23 +201,27 @@ fn cycle_subseries_smooth(
         }
         let k = span.max(degree + 2).min(sub_n);
 
-        c[phase] = local_poly_fit_at_xf64(&subs, -1.0, k, degree);
+        // Sub-series of robustness weights (when supplied).
+        let sub_weights_storage: Option<Vec<f64>> = weights.map(|w| {
+            (phase..n).step_by(period).map(|i| w[i]).collect()
+        });
+        let sub_w_ref: Option<&[f64]> = sub_weights_storage.as_deref();
+
+        let fit_one = |xq: f64| local_poly_fit_at_xf64_weighted(&subs, xq, k, degree, sub_w_ref);
+
+        c[phase] = fit_one(-1.0);
 
         if jump <= 1 || sub_n <= 2 {
             for j in 0..sub_n {
                 let orig = phase + j * period;
-                c[period + orig] = local_poly_fit_at_xf64(&subs, j as f64, k, degree);
+                c[period + orig] = fit_one(j as f64);
             }
         } else {
-            // Fit at j ∈ {0, jump, 2*jump, ..., sub_n-1} and interpolate.
             let mut fit_at: Vec<usize> = (0..sub_n).step_by(jump).collect();
             if *fit_at.last().unwrap() != sub_n - 1 {
                 fit_at.push(sub_n - 1);
             }
-            let fit_vals: Vec<f64> = fit_at
-                .iter()
-                .map(|&j| local_poly_fit_at_xf64(&subs, j as f64, k, degree))
-                .collect();
+            let fit_vals: Vec<f64> = fit_at.iter().map(|&j| fit_one(j as f64)).collect();
             for w in 0..(fit_at.len() - 1) {
                 let j0 = fit_at[w];
                 let j1 = fit_at[w + 1];
@@ -214,7 +241,7 @@ fn cycle_subseries_smooth(
         }
 
         let after = phase + sub_n * period;
-        c[period + after] = local_poly_fit_at_xf64(&subs, sub_n as f64, k, degree);
+        c[period + after] = fit_one(sub_n as f64);
     }
     c
 }
@@ -234,6 +261,9 @@ fn low_pass_filter(
 }
 
 /// One inner loop pass repeated `n_i` times. Returns `(trend, seasonal)`.
+/// Robustness weights, when supplied, are folded into the cycle-subseries
+/// LOESS (Step 2) and the trend LOESS (Step 6) per Cleveland 1990 §3.5.
+/// The low-pass MAs are unweighted.
 #[allow(clippy::too_many_arguments)]
 fn stl_inner_loop(
     y: &[f64],
@@ -245,6 +275,7 @@ fn stl_inner_loop(
     seasonal_jump: usize,
     trend_jump:    usize,
     low_pass_jump: usize,
+    weights: Option<&[f64]>,
 ) -> (Vec<f64>, Vec<f64>) {
     let n = y.len();
     let mut trend = vec![0.0f64; n];
@@ -252,11 +283,44 @@ fn stl_inner_loop(
 
     for _ in 0..n_i {
         let detrended: Vec<f64> = (0..n).map(|i| y[i] - trend[i]).collect();
-        let c = cycle_subseries_smooth(&detrended, period, n_s, 1, seasonal_jump);
+        let c = cycle_subseries_smooth(&detrended, period, n_s, 1, seasonal_jump, weights);
         let l = low_pass_filter(&c, period, n_l, 1, low_pass_jump);
         seasonal = (0..n).map(|i| c[period + i] - l[i]).collect();
         let deseasonalized: Vec<f64> = (0..n).map(|i| y[i] - seasonal[i]).collect();
-        trend = loess_compute_with_jump(&deseasonalized, n_t, 1, trend_jump);
+        trend = loess_compute_with_jump_weighted(&deseasonalized, n_t, 1, trend_jump, weights);
     }
     (trend, seasonal)
+}
+
+/// Bisquare (Tukey biweight) robustness weights from residuals.
+/// `ρ_i = (1 - (R_i / h)²)²` for `|R_i / h| < 1`, else `0`;
+/// `h = 6 · median(|R|)`. If `h` is essentially zero (perfect fit),
+/// returns all-1 weights so the next inner pass is unweighted.
+fn robust_weights(residuals: &[f64]) -> Vec<f64> {
+    let n = residuals.len();
+    let mut abs_r: Vec<f64> = residuals.iter().map(|r| r.abs()).collect();
+    abs_r.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+    let median = if n == 0 {
+        0.0
+    } else if n % 2 == 1 {
+        abs_r[n / 2]
+    } else {
+        0.5 * (abs_r[n / 2 - 1] + abs_r[n / 2])
+    };
+    let h = 6.0 * median;
+    if h < 1e-12 {
+        return vec![1.0; n];
+    }
+    residuals
+        .iter()
+        .map(|&r| {
+            let u = (r / h).abs();
+            if u >= 1.0 {
+                0.0
+            } else {
+                let v = 1.0 - u * u;
+                v * v
+            }
+        })
+        .collect()
 }

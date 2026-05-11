@@ -43,6 +43,14 @@ pub struct StlOpts {
     pub trend_window: Option<u32>,
     /// Number of inner-loop iterations. Cleveland recommends 2.
     pub inner_iters: u32,
+    /// Number of robust outer-loop iterations (Cleveland 1990 §3.5).
+    /// `0` (default) skips the outer loop and produces a non-robust
+    /// decomposition. `15` matches the default used by R's stl(robust=TRUE)
+    /// and statsmodels' STL(robust=True). Each outer iteration recomputes
+    /// per-point robustness weights from the previous residuals using the
+    /// bisquare (Tukey biweight) function, then re-runs the inner loop with
+    /// those weights folded into the cycle-subseries and trend LOESS fits.
+    pub outer_iters: u32,
     pub mode: DecomposeMode,
     /// Cleveland 1990 "jump" parameter for the cycle-subseries smoother:
     /// fit LOESS at every `seasonal_jump`-th point in each subseries and
@@ -62,6 +70,7 @@ impl StlOpts {
             seasonal_window: 7,
             trend_window: None,
             inner_iters: 2,
+            outer_iters: 0,
             mode: DecomposeMode::Additive,
             seasonal_jump: 1,
             trend_jump: 1,

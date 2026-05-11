@@ -253,3 +253,82 @@ fn zero_jumps_error() {
         Err(StlError::InvalidJump { which: "low_pass" })
     ));
 }
+
+// ── Robust outer-loop tests ──────────────────────────────────────────────
+
+#[test]
+fn outer_iters_zero_matches_default() {
+    // outer_iters = 0 must be bitwise-identical to the previous non-robust
+    // behaviour (i.e. the default before this field existed).
+    let y = airpassengers_like(144, 12);
+    let default = stl(&y, StlOpts::new(12)).unwrap();
+    let explicit = stl(
+        &y,
+        StlOpts { outer_iters: 0, ..StlOpts::new(12) },
+    )
+    .unwrap();
+    for i in 0..y.len() {
+        assert_relative_eq!(default.trend[i],    explicit.trend[i],    epsilon = 1e-12);
+        assert_relative_eq!(default.seasonal[i], explicit.seasonal[i], epsilon = 1e-12);
+        assert_relative_eq!(default.residual[i], explicit.residual[i], epsilon = 1e-12);
+    }
+}
+
+#[test]
+fn robust_outer_loop_downweights_outliers() {
+    // Build a clean series, then inject extreme outliers at a few points.
+    // The non-robust decomposition should be pulled toward the outliers
+    // (large local residual + contaminated seasonal); the robust
+    // decomposition should recover something much closer to clean.
+    let n = 144;
+    let period = 12;
+    let mut y = airpassengers_like(n, period);
+    let clean = y.clone();
+    let outlier_indices = [30, 60, 90, 120];
+    for &i in &outlier_indices {
+        y[i] += 200.0; // ~10× the signal amplitude
+    }
+
+    let clean_d  = stl(&clean, StlOpts::new(period as u32)).unwrap();
+    let nonrob_d = stl(&y,     StlOpts::new(period as u32)).unwrap();
+    let robust_d = stl(
+        &y,
+        StlOpts { outer_iters: 15, ..StlOpts::new(period as u32) },
+    )
+    .unwrap();
+
+    // Reconstruction holds either way.
+    for i in 0..n {
+        assert_relative_eq!(
+            robust_d.trend[i] + robust_d.seasonal[i] + robust_d.residual[i],
+            y[i],
+            epsilon = 1e-10
+        );
+    }
+
+    // Compare the trend recovered at non-outlier points. The robust trend
+    // should be closer to the clean trend than the non-robust one.
+    let mut rob_err = 0.0f64;
+    let mut non_err = 0.0f64;
+    for i in 0..n {
+        if outlier_indices.contains(&i) {
+            continue;
+        }
+        rob_err += (robust_d.trend[i] - clean_d.trend[i]).powi(2);
+        non_err += (nonrob_d.trend[i] - clean_d.trend[i]).powi(2);
+    }
+    assert!(
+        rob_err < non_err,
+        "robust trend should be closer to clean trend; rob={rob_err} non={non_err}"
+    );
+
+    // At the outlier positions the robust residual should absorb most of
+    // the contamination (the seasonal/trend should NOT be pulled toward
+    // the outlier).
+    for &i in &outlier_indices {
+        assert!(
+            robust_d.residual[i].abs() > 50.0,
+            "robust residual at outlier i={i} should be large, got {}", robust_d.residual[i]
+        );
+    }
+}
