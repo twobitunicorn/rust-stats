@@ -93,11 +93,36 @@ independent of statsmodels.
 ## Benchmarks
 
 Wall-clock per call, median of warmed runs, on **Apple M2 Pro / macOS**
-(rustc 1.95, statsmodels 0.14.6, numpy 2.4.4, scipy 1.17.1).
+(rustc 1.95, statsmodels 0.14.6, numpy 2.4.4, scipy 1.17.1, R 4.6).
 
 R is `stats::stl()` / `lowess()` / `decompose()` with the jump/delta
 approximations disabled (`s.jump = t.jump = l.jump = 1`, `delta = 0`)
 so we're comparing per-point fits in both directions.
+
+**Highlights** — milliseconds per call, lower is better, fastest **bolded**.
+
+Single-series, large n:
+
+| Operation | size | rust-stats | statsmodels | R 4.6 |
+| --- | --- | ---: | ---: | ---: |
+| LOESS                  | n=5 000              | **7.9** | 79.6 | 40.1 |
+| STL                    | n=2 880, period=24   | **1.7** | 11.7 |  2.4 |
+| seasonal_decompose     | n=2 880              | **0.02** |  0.22 |  1.19 |
+
+Batched, 50 series at a time:
+
+| Operation | size | rust-stats | statsmodels loop | R loop |
+| --- | --- | ---: | ---: | ---: |
+| `stl_batch`                | 50 × n=2 880  | **30.5** |   574 |   122 |
+| `loess_batch` (simd)       | 50 × n=5 000  | **36.6** |  3 914 |  2 016 |
+| `seasonal_decompose_batch` | 50 × n=2 880  |  **0.47** |    11.0 |    59.3 |
+
+R's stl/lowess Fortran beats statsmodels' Python port by 2–27× single-
+series; statsmodels' `seasonal_decompose` beats R's `decompose()` by
+5–6×. rust-stats wins both at large n and dominates the multi-series
+workloads (R and statsmodels have no native batched form).
+
+Full tables below.
 
 | Operation | Size | rust-stats | statsmodels | R 4.6 |
 | --- | --- | ---: | ---: | ---: |
