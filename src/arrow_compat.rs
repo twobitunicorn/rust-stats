@@ -12,7 +12,8 @@
 use std::sync::Arc;
 
 use arrow::array::{Array, ArrayRef, Float64Array, RecordBatch};
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+use rayon::prelude::*;
 
 use crate::error::{LoessError, OlsError, SeasonalDecomposeError, StlError};
 use crate::smoothing::loess as loess_core;
@@ -127,4 +128,114 @@ pub fn seasonal_decompose(
     opts: SeasonalDecomposeOpts,
 ) -> Result<RecordBatch, ArrowError> {
     Ok(decomposition_to_batch(sd_core(as_slice(y, "y")?, opts)?))
+}
+
+// ── Batched (multi-column) adapters ─────────────────────────────────────
+//
+// All three functions take a `RecordBatch` of `Float64` series and apply
+// the same operation to each column in parallel via rayon. The output
+// schema matches the input (same field names, same order). Validation is
+// performed up front for the whole batch, so a malformed column fails
+// fast before any compute starts.
+
+/// Output of a batched seasonal-trend decomposition. Each component is a
+/// `RecordBatch` with the same schema as the input — column `j` of `trend`
+/// is the trend of input column `j`, and similarly for `seasonal` /
+/// `residual`.
+#[derive(Debug, Clone)]
+pub struct DecompositionBatch {
+    pub trend:    RecordBatch,
+    pub seasonal: RecordBatch,
+    pub residual: RecordBatch,
+}
+
+/// Validate that every column is `Float64` and null-free, returning the
+/// per-column borrowed slices in input order.
+fn validated_columns<'a>(batch: &'a RecordBatch) -> Result<Vec<&'a [f64]>, ArrowError> {
+    let p = batch.num_columns();
+    let mut out = Vec::with_capacity(p);
+    for j in 0..p {
+        let arr = float_col(batch, j)?;
+        out.push(as_slice(arr, batch.schema().field(j).name())?);
+    }
+    Ok(out)
+}
+
+/// Build a `RecordBatch` from `cols` using the supplied schema.
+fn batch_from_columns(schema: SchemaRef, cols: Vec<Vec<f64>>) -> RecordBatch {
+    let arrays: Vec<ArrayRef> =
+        cols.into_iter().map(|c| Arc::new(Float64Array::from(c)) as ArrayRef).collect();
+    RecordBatch::try_new(schema, arrays).expect("schema/columns match by construction")
+}
+
+/// LOESS over every column of `batch`. Returns a `RecordBatch` with the
+/// same schema, where each column is the smoothed input.
+pub fn loess_batch(
+    batch: &RecordBatch,
+    span: f64,
+    degree: u8,
+) -> Result<RecordBatch, ArrowError> {
+    let cols = validated_columns(batch)?;
+    let smoothed: Result<Vec<Vec<f64>>, LoessError> =
+        cols.par_iter().map(|c| loess_core(c, span, degree)).collect();
+    Ok(batch_from_columns(batch.schema(), smoothed?))
+}
+
+fn empty_like(schema: SchemaRef, n: usize) -> Vec<Vec<f64>> {
+    (0..schema.fields().len()).map(|_| vec![0.0; n]).collect()
+}
+
+/// STL over every column of `batch`. Returns `DecompositionBatch` whose
+/// three fields share the input schema; column `j` of each field is the
+/// decomposition of input column `j`.
+pub fn stl_batch(
+    batch: &RecordBatch,
+    opts: StlOpts,
+) -> Result<DecompositionBatch, ArrowError> {
+    let cols = validated_columns(batch)?;
+    let parts: Result<Vec<Decomposition>, StlError> =
+        cols.par_iter().map(|c| stl_core(c, opts.clone())).collect();
+    let parts = parts?;
+    let n = batch.num_rows();
+    let mut trend    = empty_like(batch.schema(), n);
+    let mut seasonal = empty_like(batch.schema(), n);
+    let mut residual = empty_like(batch.schema(), n);
+    for (j, d) in parts.into_iter().enumerate() {
+        trend[j]    = d.trend;
+        seasonal[j] = d.seasonal;
+        residual[j] = d.residual;
+    }
+    Ok(DecompositionBatch {
+        trend:    batch_from_columns(batch.schema(), trend),
+        seasonal: batch_from_columns(batch.schema(), seasonal),
+        residual: batch_from_columns(batch.schema(), residual),
+    })
+}
+
+/// Classical seasonal_decompose over every column of `batch`. Returns
+/// `DecompositionBatch` whose three fields share the input schema. NaN
+/// edges (first/last `period/2` rows of trend and residual) are preserved
+/// per column.
+pub fn seasonal_decompose_batch(
+    batch: &RecordBatch,
+    opts: SeasonalDecomposeOpts,
+) -> Result<DecompositionBatch, ArrowError> {
+    let cols = validated_columns(batch)?;
+    let parts: Result<Vec<Decomposition>, SeasonalDecomposeError> =
+        cols.par_iter().map(|c| sd_core(c, opts.clone())).collect();
+    let parts = parts?;
+    let n = batch.num_rows();
+    let mut trend    = empty_like(batch.schema(), n);
+    let mut seasonal = empty_like(batch.schema(), n);
+    let mut residual = empty_like(batch.schema(), n);
+    for (j, d) in parts.into_iter().enumerate() {
+        trend[j]    = d.trend;
+        seasonal[j] = d.seasonal;
+        residual[j] = d.residual;
+    }
+    Ok(DecompositionBatch {
+        trend:    batch_from_columns(batch.schema(), trend),
+        seasonal: batch_from_columns(batch.schema(), seasonal),
+        residual: batch_from_columns(batch.schema(), residual),
+    })
 }

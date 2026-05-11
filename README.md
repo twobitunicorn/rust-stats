@@ -53,6 +53,29 @@ let decomp   = arrow_compat::stl(&series, StlOpts::new(12))?;
 // drop straight into Polars, DataFusion, or DuckDB.
 ```
 
+### Batched (multi-column) variants
+
+`loess_batch`, `stl_batch`, and `seasonal_decompose_batch` apply the same
+operation to every column of a `RecordBatch` in parallel (rayon over
+columns), preserving the input schema:
+
+```rust
+use rust_stats::arrow_compat;
+use rust_stats::StlOpts;
+
+// stocks: a RecordBatch with one Float64 column per ticker
+let trends = arrow_compat::stl_batch(&stocks, StlOpts::new(252))?.trend;
+// trends has the SAME schema as stocks — column `AAPL` is AAPL's trend.
+
+let smoothed = arrow_compat::loess_batch(&stocks, 0.3, 1)?;
+```
+
+`stl_batch` and `seasonal_decompose_batch` return a `DecompositionBatch`
+with three `RecordBatch`es (`trend`, `seasonal`, `residual`), each
+sharing the input schema. Validation runs up front for the whole batch
+— any column with the wrong type or any null fails fast before compute
+starts.
+
 Inputs must be `Float64`; any null returns `ArrowError::HasNulls` rather
 than silently substituting. Use `arrow::compute::filter` or Polars'
 `drop_nulls` upstream for statsmodels-style `missing='drop'` semantics.
