@@ -1,8 +1,4 @@
-"""Time the rust-stats bench from examples/bench.rs against statsmodels.
-
-OLS benches live in the sibling crate's bench script
-(rust-stats-ols/tests/golden/bench_statsmodels.py).
-"""
+"""Time the rust-stats bench from examples/bench.rs against statsmodels."""
 import time
 from statistics import median
 
