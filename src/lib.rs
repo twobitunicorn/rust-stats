@@ -14,5 +14,5 @@ pub use error::{LoessError, SeasonalDecomposeError, StlError};
 pub use smoothing::{loess, loess_at};
 pub use tsa::{
     seasonal_decompose, stl, DecomposeMode, Decomposition, Missing, SeasonalDecomposeOpts,
-    StlOpts,
+    SeasonalWindow, StlOpts,
 };

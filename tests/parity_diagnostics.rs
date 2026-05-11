@@ -2,7 +2,9 @@
 //! against the statsmodels reference. Used to set parity-test tolerances.
 
 use rust_stats::smoothing::loess;
-use rust_stats::tsa::{seasonal_decompose, stl, DecomposeMode, SeasonalDecomposeOpts, StlOpts};
+use rust_stats::tsa::{
+    seasonal_decompose, stl, DecomposeMode, SeasonalDecomposeOpts, SeasonalWindow, StlOpts,
+};
 use serde::Deserialize;
 use std::path::PathBuf;
 
@@ -95,7 +97,7 @@ fn check_seasonal_decompose(name: &str) {
 fn check_stl(name: &str) {
     let g: StlGolden = load("stl", name);
     let mut opts = StlOpts::new(g.period);
-    opts.seasonal_window = g.seasonal_window;
+    opts.seasonal_window = SeasonalWindow::Window(g.seasonal_window);
     opts.inner_iters = 2;
     opts.mode = mode_of(&g.mode);
     let d = stl(&g.y, opts).unwrap();

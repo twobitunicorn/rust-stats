@@ -8,7 +8,7 @@
 //! covered by our generated parity tests in `tests/stl_golden.rs`.
 
 use rust_stats::error::StlError;
-use rust_stats::tsa::{stl, StlOpts};
+use rust_stats::tsa::{stl, SeasonalWindow, StlOpts};
 
 fn dummy_series(n: usize, period: usize) -> Vec<f64> {
     // Cleveland-style: trend + sin seasonal + noise-free.
@@ -46,21 +46,21 @@ fn test_parameter_checks_period() {
 fn test_parameter_checks_seasonal() {
     let y = dummy_series(120, 12);
     let mut opts = StlOpts::new(12);
-    opts.seasonal_window = 2;
+    opts.seasonal_window = SeasonalWindow::Window(2);
     assert!(matches!(
         stl(&y, opts),
         Err(StlError::InvalidSeasonalWindow(2))
     ));
 
     let mut opts = StlOpts::new(12);
-    opts.seasonal_window = 8; // even
+    opts.seasonal_window = SeasonalWindow::Window(8); // even
     assert!(matches!(
         stl(&y, opts),
         Err(StlError::InvalidSeasonalWindow(8))
     ));
 
     let mut opts = StlOpts::new(12);
-    opts.seasonal_window = 5; // odd but < 7
+    opts.seasonal_window = SeasonalWindow::Window(5); // odd but < 7
     assert!(matches!(
         stl(&y, opts),
         Err(StlError::InvalidSeasonalWindow(5))
@@ -100,13 +100,13 @@ fn test_default_trend() {
 
         let opts_default = StlOpts {
             period,
-            seasonal_window: seasonal,
+            seasonal_window: SeasonalWindow::Window(seasonal),
             trend_window: None,
             ..StlOpts::new(period)
         };
         let opts_explicit = StlOpts {
             period,
-            seasonal_window: seasonal,
+            seasonal_window: SeasonalWindow::Window(seasonal),
             trend_window: Some(expected),
             ..StlOpts::new(period)
         };

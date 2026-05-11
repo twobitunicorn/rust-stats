@@ -29,6 +29,23 @@ pub enum DecomposeMode {
     Multiplicative,
 }
 
+/// How to smooth the seasonal cycle-subseries.
+///
+/// `Window(n)` (the standard Cleveland 1990 setup) fits a LOESS of the
+/// given odd span (`n >= 7`) within each phase's subseries, letting the
+/// seasonal pattern evolve smoothly over time.
+///
+/// `Periodic` constrains the seasonal pattern to be exactly periodic:
+/// each phase's seasonal value is set to the (robustness-weighted) mean
+/// of that phase's observations, repeated for every cycle. This matches
+/// R's `stl(s.window = "periodic")` and is appropriate when the
+/// seasonality is known to be stationary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeasonalWindow {
+    Window(u32),
+    Periodic,
+}
+
 /// Policy for handling non-finite (NaN / ±Inf) entries in the input.
 ///
 /// `Error` (default) preserves the existing behaviour: any non-finite
@@ -94,9 +111,10 @@ pub(crate) fn interpolate_missing(y: &[f64]) -> Option<Vec<f64>> {
 #[derive(Debug, Clone)]
 pub struct StlOpts {
     pub period: u32,
-    /// LOESS span (in points) for cycle-subseries smoothing.
-    /// Must be odd and >= 7.
-    pub seasonal_window: u32,
+    /// Cycle-subseries smoothing policy. `Window(n)` (default) uses a
+    /// LOESS of the given odd span (`n >= 7`); `Periodic` forces an
+    /// exactly-repeating seasonal pattern (per-phase mean).
+    pub seasonal_window: SeasonalWindow,
     /// LOESS span for the trend smoother. `None` uses Cleveland's
     /// recommended formula: smallest odd >=
     /// `1.5 * period / (1 - 1.5 / seasonal_window)`.
@@ -129,7 +147,7 @@ impl StlOpts {
     pub fn new(period: u32) -> Self {
         Self {
             period,
-            seasonal_window: 7,
+            seasonal_window: SeasonalWindow::Window(7),
             trend_window: None,
             inner_iters: 2,
             outer_iters: 0,

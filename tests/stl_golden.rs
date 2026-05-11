@@ -15,7 +15,7 @@
 //! and exposes any internal bug that does not show in component drift.
 
 use approx::assert_relative_eq;
-use rust_stats::tsa::{stl, DecomposeMode, StlOpts};
+use rust_stats::tsa::{stl, DecomposeMode, SeasonalWindow, StlOpts};
 use serde::Deserialize;
 use std::path::PathBuf;
 
@@ -56,7 +56,7 @@ struct Tol {
 fn assert_dataset(name: &str, tol: Tol) {
     let g = load(name);
     let mut opts = StlOpts::new(g.period);
-    opts.seasonal_window = g.seasonal_window;
+    opts.seasonal_window = SeasonalWindow::Window(g.seasonal_window);
     opts.inner_iters = 2;
     opts.mode = decompose_mode(&g.mode);
     let d = stl(&g.y, opts).expect("stl failed");

@@ -16,7 +16,9 @@ use crate::smoothing::loess::{
     local_poly_fit_at_xf64_weighted, loess_compute_with_jump,
     loess_compute_with_jump_weighted,
 };
-use crate::tsa::seasonal::{interpolate_missing, DecomposeMode, Decomposition, Missing, StlOpts};
+use crate::tsa::seasonal::{
+    interpolate_missing, DecomposeMode, Decomposition, Missing, SeasonalWindow, StlOpts,
+};
 
 /// Cleveland 1990 STL.
 ///
@@ -32,17 +34,33 @@ pub fn stl(y: &[f64], opts: StlOpts) -> Result<Decomposition, StlError> {
     }
     let period = opts.period as usize;
 
-    let n_s = opts.seasonal_window as usize;
-    if n_s < 7 || n_s % 2 == 0 {
-        return Err(StlError::InvalidSeasonalWindow(opts.seasonal_window));
-    }
+    let seasonal_kind = opts.seasonal_window;
+    let n_s_for_trend = match seasonal_kind {
+        SeasonalWindow::Window(n) => {
+            if n < 7 || n % 2 == 0 {
+                return Err(StlError::InvalidSeasonalWindow(n));
+            }
+            n as usize
+        }
+        // Periodic ≡ n_s → ∞, which collapses the trend-window formula to
+        // `next_odd(1.5 * period)`. Use a sentinel that produces that
+        // result via the same expression.
+        SeasonalWindow::Periodic => usize::MAX,
+    };
 
     let n_l = if period % 2 == 0 { period + 1 } else { period };
 
     let n_t = match opts.trend_window {
         // Cleveland 1990 §3.4: trend smoother span defaults to the smallest
         // odd integer >= 1.5 * period / (1 - 1.5 / seasonal_window).
-        None => next_odd_ceil(1.5 * period as f64 / (1.0 - 1.5 / n_s as f64)),
+        None => {
+            let denom = if n_s_for_trend == usize::MAX {
+                1.0
+            } else {
+                1.0 - 1.5 / n_s_for_trend as f64
+            };
+            next_odd_ceil(1.5 * period as f64 / denom)
+        }
         Some(t) => {
             if t % 2 == 0 {
                 return Err(StlError::InvalidTrendWindow(t));
@@ -134,7 +152,7 @@ pub fn stl(y: &[f64], opts: StlOpts) -> Result<Decomposition, StlError> {
     loop {
         let w_ref: Option<&[f64]> = if pass == 0 { None } else { Some(&weights) };
         let (t, s) = stl_inner_loop(
-            &work, period, n_s, n_l, n_t, n_i,
+            &work, period, seasonal_kind, n_l, n_t, n_i,
             seasonal_jump, trend_jump, low_pass_jump,
             w_ref,
         );
@@ -207,11 +225,15 @@ fn valid_ma(y: &[f64], window: usize) -> Vec<f64> {
 /// fits can use Cleveland's `jump` approximation and accept per-point
 /// robustness weights (for the outer loop). `weights = None` is exact
 /// and reproduces the non-robust path bitwise.
+///
+/// When `seasonal_kind = Periodic`, each phase's smoothed value is the
+/// (weighted) mean of that phase's observations, repeated for every
+/// cycle plus both boundary extrapolation points. No LOESS is performed.
 #[allow(clippy::too_many_arguments)]
 fn cycle_subseries_smooth(
     d: &[f64],
     period: usize,
-    span: usize,
+    seasonal_kind: SeasonalWindow,
     degree: usize,
     jump: usize,
     weights: Option<&[f64]>,
@@ -225,49 +247,80 @@ fn cycle_subseries_smooth(
         if sub_n == 0 {
             continue;
         }
-        let k = span.max(degree + 2).min(sub_n);
 
-        // Sub-series of robustness weights (when supplied).
         let sub_weights_storage: Option<Vec<f64>> = weights.map(|w| {
             (phase..n).step_by(period).map(|i| w[i]).collect()
         });
         let sub_w_ref: Option<&[f64]> = sub_weights_storage.as_deref();
 
-        let fit_one = |xq: f64| local_poly_fit_at_xf64_weighted(&subs, xq, k, degree, sub_w_ref);
-
-        c[phase] = fit_one(-1.0);
-
-        if jump <= 1 || sub_n <= 2 {
-            for j in 0..sub_n {
-                let orig = phase + j * period;
-                c[period + orig] = fit_one(j as f64);
-            }
-        } else {
-            let mut fit_at: Vec<usize> = (0..sub_n).step_by(jump).collect();
-            if *fit_at.last().unwrap() != sub_n - 1 {
-                fit_at.push(sub_n - 1);
-            }
-            let fit_vals: Vec<f64> = fit_at.iter().map(|&j| fit_one(j as f64)).collect();
-            for w in 0..(fit_at.len() - 1) {
-                let j0 = fit_at[w];
-                let j1 = fit_at[w + 1];
-                let y0 = fit_vals[w];
-                let y1 = fit_vals[w + 1];
-                let span_j = (j1 - j0) as f64;
-                c[period + (phase + j0 * period)] = y0;
-                if j1 > j0 + 1 {
-                    for j in (j0 + 1)..j1 {
-                        let alpha = (j - j0) as f64 / span_j;
-                        c[period + (phase + j * period)] = y0 + alpha * (y1 - y0);
+        match seasonal_kind {
+            SeasonalWindow::Periodic => {
+                // Weighted mean of the subseries, broadcast to every
+                // position in this phase plus both boundary cells.
+                let mean = match sub_w_ref {
+                    Some(w) => {
+                        let mut wsum = 0.0;
+                        let mut wysum = 0.0;
+                        for (yi, wi) in subs.iter().zip(w.iter()) {
+                            wsum += *wi;
+                            wysum += *wi * *yi;
+                        }
+                        if wsum > 0.0 {
+                            wysum / wsum
+                        } else {
+                            subs.iter().sum::<f64>() / sub_n as f64
+                        }
                     }
+                    None => subs.iter().sum::<f64>() / sub_n as f64,
+                };
+                c[phase] = mean;
+                for j in 0..sub_n {
+                    c[period + (phase + j * period)] = mean;
                 }
+                c[period + (phase + sub_n * period)] = mean;
             }
-            let last_j = *fit_at.last().unwrap();
-            c[period + (phase + last_j * period)] = *fit_vals.last().unwrap();
-        }
+            SeasonalWindow::Window(span_u) => {
+                let span = span_u as usize;
+                let k = span.max(degree + 2).min(sub_n);
+                let fit_one =
+                    |xq: f64| local_poly_fit_at_xf64_weighted(&subs, xq, k, degree, sub_w_ref);
 
-        let after = phase + sub_n * period;
-        c[period + after] = fit_one(sub_n as f64);
+                c[phase] = fit_one(-1.0);
+
+                if jump <= 1 || sub_n <= 2 {
+                    for j in 0..sub_n {
+                        let orig = phase + j * period;
+                        c[period + orig] = fit_one(j as f64);
+                    }
+                } else {
+                    let mut fit_at: Vec<usize> = (0..sub_n).step_by(jump).collect();
+                    if *fit_at.last().unwrap() != sub_n - 1 {
+                        fit_at.push(sub_n - 1);
+                    }
+                    let fit_vals: Vec<f64> =
+                        fit_at.iter().map(|&j| fit_one(j as f64)).collect();
+                    for w in 0..(fit_at.len() - 1) {
+                        let j0 = fit_at[w];
+                        let j1 = fit_at[w + 1];
+                        let y0 = fit_vals[w];
+                        let y1 = fit_vals[w + 1];
+                        let span_j = (j1 - j0) as f64;
+                        c[period + (phase + j0 * period)] = y0;
+                        if j1 > j0 + 1 {
+                            for j in (j0 + 1)..j1 {
+                                let alpha = (j - j0) as f64 / span_j;
+                                c[period + (phase + j * period)] = y0 + alpha * (y1 - y0);
+                            }
+                        }
+                    }
+                    let last_j = *fit_at.last().unwrap();
+                    c[period + (phase + last_j * period)] = *fit_vals.last().unwrap();
+                }
+
+                let after = phase + sub_n * period;
+                c[period + after] = fit_one(sub_n as f64);
+            }
+        }
     }
     c
 }
@@ -294,7 +347,7 @@ fn low_pass_filter(
 fn stl_inner_loop(
     y: &[f64],
     period: usize,
-    n_s: usize,
+    seasonal_kind: SeasonalWindow,
     n_l: usize,
     n_t: usize,
     n_i: usize,
@@ -309,7 +362,7 @@ fn stl_inner_loop(
 
     for _ in 0..n_i {
         let detrended: Vec<f64> = (0..n).map(|i| y[i] - trend[i]).collect();
-        let c = cycle_subseries_smooth(&detrended, period, n_s, 1, seasonal_jump, weights);
+        let c = cycle_subseries_smooth(&detrended, period, seasonal_kind, 1, seasonal_jump, weights);
         let l = low_pass_filter(&c, period, n_l, 1, low_pass_jump);
         seasonal = (0..n).map(|i| c[period + i] - l[i]).collect();
         let deseasonalized: Vec<f64> = (0..n).map(|i| y[i] - seasonal[i]).collect();

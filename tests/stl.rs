@@ -2,7 +2,7 @@
 
 use approx::assert_relative_eq;
 use rust_stats::error::StlError;
-use rust_stats::tsa::{stl, DecomposeMode, Missing, StlOpts};
+use rust_stats::tsa::{stl, DecomposeMode, Missing, SeasonalWindow, StlOpts};
 
 #[test]
 fn pure_linear_trend_recovered_everywhere() {
@@ -106,7 +106,7 @@ fn validation_paths() {
         stl(
             &y,
             StlOpts {
-                seasonal_window: 8,
+                seasonal_window: SeasonalWindow::Window(8),
                 ..StlOpts::new(4)
             }
         ),
@@ -385,4 +385,62 @@ fn missing_interpolate_all_nan_errors() {
         ..StlOpts::new(4)
     };
     assert!(matches!(stl(&y, opts), Err(StlError::NonFinite)));
+}
+
+// ── Periodic seasonal ────────────────────────────────────────────────────
+
+#[test]
+fn periodic_seasonal_repeats_exactly() {
+    // Build a series with a stationary seasonal pattern + linear trend +
+    // noise. SeasonalWindow::Periodic should produce a seasonal component
+    // that's identical across every cycle.
+    let period: u32 = 12;
+    let n = 144usize;
+    let y = airpassengers_like(n, period as usize);
+
+    let d = stl(
+        &y,
+        StlOpts {
+            seasonal_window: SeasonalWindow::Periodic,
+            ..StlOpts::new(period)
+        },
+    )
+    .unwrap();
+
+    // The seasonal value at phase p should be the same in every cycle.
+    for phase in 0..(period as usize) {
+        let first = d.seasonal[phase];
+        for cycle in 1..(n / period as usize) {
+            let i = phase + cycle * period as usize;
+            assert_relative_eq!(d.seasonal[i], first, epsilon = 1e-10);
+        }
+    }
+
+    // Reconstruction still holds.
+    for i in 0..n {
+        assert_relative_eq!(
+            d.trend[i] + d.seasonal[i] + d.residual[i],
+            y[i],
+            epsilon = 1e-10
+        );
+    }
+}
+
+#[test]
+fn periodic_default_trend_window_is_finite() {
+    // With Periodic seasonal, the trend-window auto-formula takes the
+    // n_s -> infinity limit (= next_odd(1.5 * period)). Should produce
+    // a sensible decomposition rather than panicking or NaN-ing out.
+    let y = airpassengers_like(96, 12);
+    let d = stl(
+        &y,
+        StlOpts {
+            seasonal_window: SeasonalWindow::Periodic,
+            ..StlOpts::new(12)
+        },
+    )
+    .unwrap();
+    for i in 0..y.len() {
+        assert!(d.trend[i].is_finite() && d.seasonal[i].is_finite() && d.residual[i].is_finite());
+    }
 }
