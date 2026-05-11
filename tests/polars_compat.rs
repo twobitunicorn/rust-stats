@@ -39,7 +39,7 @@ fn loess_matches_slice_api() {
     let y: Vec<f64> = (0..n).map(|i| i as f64).collect();
     let s = Series::new("y".into(), y.clone());
 
-    let out = loess(&s, 0.5, 1).unwrap();
+    let out = loess(&s, 0.5, 1, Missing::Error).unwrap();
     let scalar = rust_stats::smoothing::loess(&y, 0.5, 1).unwrap();
 
     assert_eq!(out.name().as_str(), "y");
@@ -54,14 +54,14 @@ fn loess_rejects_nulls() {
     let mut vals: Vec<Option<f64>> = (0..20).map(|i| Some(i as f64)).collect();
     vals[7] = None;
     let s = Series::new("y".into(), vals);
-    let err = loess(&s, 0.5, 1).unwrap_err();
+    let err = loess(&s, 0.5, 1, Missing::Error).unwrap_err();
     assert!(matches!(err, PolarsCompatError::HasNulls { .. }));
 }
 
 #[test]
 fn loess_rejects_non_float64() {
     let s = Series::new("y".into(), (0..10i64).collect::<Vec<_>>());
-    let err = loess(&s, 0.5, 1).unwrap_err();
+    let err = loess(&s, 0.5, 1, Missing::Error).unwrap_err();
     assert!(matches!(err, PolarsCompatError::NotFloat64(name) if name == "y"));
 }
 
@@ -143,7 +143,7 @@ fn loess_batch_matches_scalar_column_by_column() {
     let names = ["s0", "s1", "s2", "s3", "s4"];
     let df = df_of_series(&names, series.clone());
 
-    let out_df = loess_batch(&df, 0.3, 1).unwrap();
+    let out_df = loess_batch(&df, 0.3, 1, Missing::Error).unwrap();
     assert_eq!(out_df.height(), n);
     for (j, name) in names.iter().enumerate() {
         let scalar = rust_stats::smoothing::loess(&series[j], 0.3, 1).unwrap();
@@ -222,7 +222,7 @@ fn batched_rejects_nulls_in_any_column() {
     .unwrap();
 
     assert!(matches!(
-        loess_batch(&df, 0.3, 1),
+        loess_batch(&df, 0.3, 1, Missing::Error),
         Err(PolarsCompatError::HasNulls { col, .. }) if col == "hasnan"
     ));
     assert!(matches!(
@@ -233,10 +233,59 @@ fn batched_rejects_nulls_in_any_column() {
 
 #[test]
 fn module_surface() {
-    let _: fn(&Series, f64, u8) -> Result<Series, PolarsCompatError> = polars_compat::loess;
+    let _: fn(&Series, f64, u8, Missing) -> Result<Series, PolarsCompatError> =
+        polars_compat::loess;
     let _: fn(&Series, StlOpts) -> Result<DataFrame, PolarsCompatError> = polars_compat::stl;
     let _: fn(&Series, SeasonalDecomposeOpts) -> Result<DataFrame, PolarsCompatError> =
         polars_compat::seasonal_decompose;
+}
+
+#[test]
+fn loess_interpolate_handles_polars_nulls() {
+    let n = 200;
+    let mut y: Vec<Option<f64>> = (0..n)
+        .map(|i| Some((i as f64 * 0.05).sin() + 0.1 * i as f64))
+        .collect();
+    y[40] = None;
+    y[41] = None;
+    y[150] = None;
+    let s = Series::new("y".into(), y.clone());
+
+    let out = loess(&s, 0.3, 1, Missing::Interpolate).unwrap();
+    assert_eq!(out.len(), n);
+
+    // Every output value is finite — the polars adapter linear-fills
+    // the nulls before calling LOESS, so the smoother sees a complete
+    // series and emits a smoothed value at every position.
+    let ca = out.f64().unwrap();
+    for i in 0..n {
+        let v = ca.get(i).unwrap();
+        assert!(v.is_finite(), "loess output at i={i} should be finite, got {v}");
+    }
+}
+
+#[test]
+fn loess_batch_interpolate_handles_polars_nulls() {
+    let n = 200;
+    let a: Vec<Option<f64>> = (0..n).map(|i| Some((i as f64 * 0.05).sin())).collect();
+    let mut b = a.clone();
+    b[80] = None;
+    let df = DataFrame::new(
+        n,
+        vec![
+            Series::new("clean".into(), a).into_column(),
+            Series::new("gappy".into(), b).into_column(),
+        ],
+    )
+    .unwrap();
+
+    let out = loess_batch(&df, 0.3, 1, Missing::Interpolate).unwrap();
+    for name in ["clean", "gappy"] {
+        let ca = out.column(name).unwrap().f64().unwrap();
+        for i in 0..n {
+            assert!(ca.get(i).unwrap().is_finite(), "{name}[{i}] should be finite");
+        }
+    }
 }
 
 // ── Missing::Interpolate via the polars layer ──────────────────────────

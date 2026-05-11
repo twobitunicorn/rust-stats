@@ -14,6 +14,7 @@ use polars::prelude::*;
 
 use crate::error::{LoessError, SeasonalDecomposeError, StlError};
 use crate::smoothing::loess as core_loess;
+use crate::tsa::seasonal::interpolate_missing;
 use crate::tsa::{
     seasonal_decompose as core_sd, stl as core_stl, Missing, SeasonalDecomposeOpts, StlOpts,
 };
@@ -54,13 +55,41 @@ fn series_to_vec(s: &Series, missing: Missing) -> Result<Vec<f64>, PolarsCompatE
     }
 }
 
-/// LOESS on a Polars `Series`. Errors on any null in `s` — preprocess
-/// with `s.fill_null(...)` or `s.interpolate(...)` upstream if your
-/// data has gaps. Output keeps the input's name.
-pub fn loess(s: &Series, span: f64, degree: u8) -> Result<Series, PolarsCompatError> {
-    let v = series_to_vec(s, Missing::Error)?;
+/// LOESS on a Polars `Series`. `missing` controls how Polars nulls are
+/// handled: `Missing::Error` (the typical choice) fails fast with
+/// `HasNulls`; `Missing::Interpolate` linearly fills nulls (and any
+/// pre-existing `NaN`/`Inf`) at the polars layer before the LOESS fit.
+/// Output keeps the input's name and has no NaN edges — at imputed
+/// positions, the output is the smoother's estimate.
+pub fn loess(
+    s: &Series,
+    span: f64,
+    degree: u8,
+    missing: Missing,
+) -> Result<Series, PolarsCompatError> {
+    let v = prepare_for_loess(s, missing)?;
     let out = core_loess(&v, span, degree)?;
     Ok(Series::new(s.name().clone(), out))
+}
+
+/// Extract a Series' values for LOESS, applying the missing-data
+/// policy. With `Missing::Interpolate` we run our linear-interpolation
+/// helper *before* calling the core, since the core `loess()` has no
+/// `Missing` option of its own.
+fn prepare_for_loess(s: &Series, missing: Missing) -> Result<Vec<f64>, PolarsCompatError> {
+    let v = series_to_vec(s, missing)?;
+    match missing {
+        Missing::Error => Ok(v),
+        Missing::Interpolate => {
+            if v.iter().any(|x| !x.is_finite()) {
+                interpolate_missing(&v).ok_or_else(|| {
+                    PolarsCompatError::Loess(LoessError::Empty)
+                })
+            } else {
+                Ok(v)
+            }
+        }
+    }
 }
 
 /// Build a 3-column DataFrame {trend, seasonal, residual} from a
@@ -137,11 +166,21 @@ fn rebuild_df(schema_src: &DataFrame, cols: Vec<Vec<f64>>) -> Result<DataFrame, 
 /// shared batched LOESS path when the `arrow` feature is also enabled
 /// (so polars+arrow users get the SIMD kernel); otherwise falls back to
 /// rayon-over-columns scalar LOESS.
-pub fn loess_batch(df: &DataFrame, span: f64, degree: u8) -> Result<DataFrame, PolarsCompatError> {
-    // LOESS has no `Missing` option in the core API; preprocess upstream
-    // with `df.fill_null(...)` / `Series::interpolate(...)` if any column
-    // contains nulls.
-    let cols = validated_columns(df, Missing::Error)?;
+pub fn loess_batch(
+    df: &DataFrame,
+    span: f64,
+    degree: u8,
+    missing: Missing,
+) -> Result<DataFrame, PolarsCompatError> {
+    let mut cols = validated_columns(df, missing)?;
+    if matches!(missing, Missing::Interpolate) {
+        for col in cols.iter_mut() {
+            if col.iter().any(|x| !x.is_finite()) {
+                *col = interpolate_missing(col)
+                    .ok_or_else(|| PolarsCompatError::Loess(LoessError::Empty))?;
+            }
+        }
+    }
     let outs = run_loess_batch(&cols, span, degree)?;
     rebuild_df(df, outs)
 }

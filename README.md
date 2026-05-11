@@ -156,12 +156,12 @@ rust-stats = { version = "...", features = ["polars"] }
 
 ```rust
 use rust_stats::polars_compat;
-use rust_stats::StlOpts;
+use rust_stats::{StlOpts, Missing};
 use polars::prelude::*;
 
 let y_series: Series = /* ... */;
 
-let smoothed: Series = polars_compat::loess(&y_series, 0.3, 1)?;
+let smoothed: Series = polars_compat::loess(&y_series, 0.3, 1, Missing::Error)?;
 let decomp:   DataFrame = polars_compat::stl(&y_series, StlOpts::new(12))?;
 // decomp has columns `trend | seasonal | residual`.
 ```
@@ -175,7 +175,7 @@ column schema:
 let trends = polars_compat::stl_batch(&prices, StlOpts::new(252))?.trend;
 // trends has the same schema as prices — column "AAPL" is AAPL's trend.
 
-let smoothed = polars_compat::loess_batch(&prices, 0.3, 1)?;
+let smoothed = polars_compat::loess_batch(&prices, 0.3, 1, Missing::Error)?;
 ```
 
 `stl_batch` and `seasonal_decompose_batch` return a
@@ -183,26 +183,35 @@ let smoothed = polars_compat::loess_batch(&prices, 0.3, 1)?;
 `residual`), each sharing the input schema.
 
 Validation runs up front: input columns must be `Float64`. By default
-any Polars null returns `PolarsCompatError::HasNulls`, but `stl` /
-`seasonal_decompose` honour `opts.missing` — set `Missing::Interpolate`
-to linearly fill nulls (the residual at originally-null positions is
-returned as NaN on output, so callers can still see which rows were
-imputed):
+any Polars null returns `PolarsCompatError::HasNulls`. To linearly fill
+nulls instead, pass `Missing::Interpolate` — for `stl` /
+`seasonal_decompose` it lives on `opts.missing`, for `loess` /
+`loess_batch` it's a function parameter:
 
 ```rust
 use rust_stats::{StlOpts, Missing};
 
+// STL: per-opts
 let d = polars_compat::stl(&y_with_nulls, StlOpts {
     missing: Missing::Interpolate,
     ..StlOpts::new(12)
 })?;
-// d's trend / seasonal columns are finite everywhere;
-// d.residual is NaN at the rows that were originally null in y_with_nulls.
-```
+// trend / seasonal are finite everywhere; residual is NaN at the rows
+// that were originally null (so callers can still see which rows the
+// decomposition imputed).
 
-(LOESS doesn't have a `Missing` option in the core API — preprocess
-upstream with `Series::interpolate(...)` or `Series::fill_null(...)`
-if your data has gaps.)
+// LOESS: per-call
+let smoothed = polars_compat::loess(&y_with_nulls, 0.3, 1, Missing::Interpolate)?;
+// Every output value is finite — there's no residual concept for
+// LOESS, so the smoother just sees a linearly-filled input.
+
+// Batched variants too:
+let smoothed_df = polars_compat::loess_batch(&prices_with_gaps, 0.3, 1, Missing::Interpolate)?;
+let decomp     = polars_compat::stl_batch(&prices_with_gaps, StlOpts {
+    missing: Missing::Interpolate,
+    ..StlOpts::new(252)
+})?;
+```
 
 When both `polars` and `arrow` features are on, `loess_batch` routes
 through the shared SIMD batched-LOESS kernel; with just `polars`, it
