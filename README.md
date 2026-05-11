@@ -101,18 +101,18 @@ so we're comparing per-point fits in both directions.
 
 | Operation | Size | rust-stats | statsmodels | R 4.6 |
 | --- | --- | ---: | ---: | ---: |
-| LOESS (deg=1, span=0.3)   | n=100              | 0.033 ms | 0.576 ms |    0.021 ms |
-| LOESS (deg=1, span=0.3)   | n=1 000            | 0.460 ms | 7.859 ms |    1.631 ms |
-| LOESS (deg=1, span=0.3)   | n=5 000            | 7.146 ms | 80.711 ms|   40.174 ms |
-| STL                       | n=144,  period=12  | 0.175 ms | 0.323 ms |    0.106 ms |
-| STL                       | n=720,  period=12  | 0.696 ms | 1.570 ms |    0.349 ms |
-| STL                       | n=2 880, period=24 | 1.702 ms | 11.547 ms |   2.385 ms |
-| seasonal_decompose (+)    | n=144,  period=12  | 0.001 ms | 0.115 ms |    0.545 ms |
-| seasonal_decompose (+)    | n=720,  period=12  | 0.004 ms | 0.120 ms |    0.661 ms |
-| seasonal_decompose (+)    | n=2 880, period=24 | 0.023 ms | 0.218 ms |    1.294 ms |
-| seasonal_decompose (×)    | n=144,  period=12  | 0.001 ms | 0.120 ms |    0.539 ms |
-| seasonal_decompose (×)    | n=720,  period=12  | 0.004 ms | 0.125 ms |    0.664 ms |
-| seasonal_decompose (×)    | n=2 880, period=24 | 0.024 ms | 0.230 ms |    1.173 ms |
+| LOESS (deg=1, span=0.3)   | n=100              | 0.034 ms | 0.558 ms |    0.021 ms |
+| LOESS (deg=1, span=0.3)   | n=1 000            | 0.528 ms | 7.547 ms |    1.652 ms |
+| LOESS (deg=1, span=0.3)   | n=5 000            | 7.903 ms | 79.613 ms |  40.113 ms |
+| STL                       | n=144,  period=12  | 0.176 ms | 0.316 ms |    0.111 ms |
+| STL                       | n=720,  period=12  | 0.653 ms | 1.602 ms |    0.356 ms |
+| STL                       | n=2 880, period=24 | 1.723 ms | 11.669 ms |   2.397 ms |
+| seasonal_decompose (+)    | n=144,  period=12  | 0.001 ms | 0.117 ms |    0.578 ms |
+| seasonal_decompose (+)    | n=720,  period=12  | 0.004 ms | 0.121 ms |    0.704 ms |
+| seasonal_decompose (+)    | n=2 880, period=24 | 0.024 ms | 0.223 ms |    1.194 ms |
+| seasonal_decompose (×)    | n=144,  period=12  | 0.001 ms | 0.120 ms |    0.562 ms |
+| seasonal_decompose (×)    | n=720,  period=12  | 0.005 ms | 0.129 ms |    0.678 ms |
+| seasonal_decompose (×)    | n=2 880, period=24 | 0.024 ms | 0.227 ms |    1.108 ms |
 
 ### Batched (50 series per call)
 
@@ -127,14 +127,14 @@ straight Python loop over the same 50 series.
 
 | Operation | Size | rust-stats `*_batch` | statsmodels loop | R loop |
 | --- | --- | ---: | ---: | ---: |
-| `stl_batch`                | 50 × n=720,   period=12 |   6.2 ms |    77.8 ms |    17.3 ms |
-| `stl_batch`                | 50 × n=1 000, period=12 |   8.3 ms |   108.1 ms |    24.3 ms |
-| `stl_batch`                | 50 × n=2 880, period=24 |  33.0 ms |   586.0 ms |   119.7 ms |
-| `seasonal_decompose_batch` | 50 × n=720,   period=12 |   0.18 ms |    5.98 ms |    35.2 ms |
-| `seasonal_decompose_batch` | 50 × n=1 000, period=12 |   0.19 ms |    5.91 ms |    37.8 ms |
-| `seasonal_decompose_batch` | 50 × n=2 880, period=24 |   0.38 ms |    10.9 ms |    56.3 ms |
-| `loess_batch` (simd)       | 50 × n=1 000, span=0.3  |   1.7 ms |   385.4 ms |    80.7 ms |
-| `loess_batch` (simd)       | 50 × n=5 000, span=0.3  |  36.6 ms |  4041.9 ms |  1971.1 ms |
+| `stl_batch`                | 50 × n=720,   period=12 |   5.7 ms |    76.2 ms |    18.3 ms |
+| `stl_batch`                | 50 × n=1 000, period=12 |   7.7 ms |   105.2 ms |    24.2 ms |
+| `stl_batch`                | 50 × n=2 880, period=24 |  30.5 ms |   574.1 ms |   121.8 ms |
+| `seasonal_decompose_batch` | 50 × n=720,   period=12 |   0.15 ms |    5.95 ms |    35.6 ms |
+| `seasonal_decompose_batch` | 50 × n=1 000, period=12 |   0.18 ms |    5.98 ms |    38.7 ms |
+| `seasonal_decompose_batch` | 50 × n=2 880, period=24 |   0.47 ms |    11.0 ms |    59.3 ms |
+| `loess_batch` (simd)       | 50 × n=1 000, span=0.3  |   1.7 ms |   381.5 ms |    82.0 ms |
+| `loess_batch` (simd)       | 50 × n=5 000, span=0.3  |  36.6 ms |  3914.1 ms |  2016.2 ms |
 
 `loess_batch` numbers are with the `simd` feature on; without it (stable
 Rust, no nightly), the rayon-only fallback runs at ~14 ms / ~330 ms — a
@@ -171,15 +171,15 @@ is faster.
 
 | Operation | n=144/100 | n=720/1 000 | n=2 880/5 000 |
 | --- | ---: | ---: | ---: |
-| LOESS               | R 27× |  R 4.8× | R 2.0× |
-| STL                 | R 3.0× | R 4.5× | R 4.8× |
-| seasonal_decompose  | statsmodels 4.7× | statsmodels 5.5× | statsmodels 5.9× |
+| LOESS               | R 27× | R 4.6× | R 2.0× |
+| STL                 | R 2.8× | R 4.5× | R 4.9× |
+| seasonal_decompose  | statsmodels 4.9× | statsmodels 5.8× | statsmodels 5.4× |
 
 | Batched (50 series) | n=720 / 1 000 | n=1 000 | n=2 880 / 5 000 |
 | --- | ---: | ---: | ---: |
-| stl_batch loop                 | R 4.5× | R 4.4× | R 4.9× |
-| seasonal_decompose_batch loop  | statsmodels 5.9× | statsmodels 6.4× | statsmodels 5.2× |
-| loess_batch loop               | — | R 4.8× | R 2.1× |
+| stl_batch loop                 | R 4.2× | R 4.3× | R 4.7× |
+| seasonal_decompose_batch loop  | statsmodels 6.0× | statsmodels 6.5× | statsmodels 5.4× |
+| loess_batch loop               | — | R 4.7× | R 1.9× |
 
 R's stl/lowess Fortran beats statsmodels' Python port by 2–27×.
 statsmodels' `seasonal_decompose` (a thin NumPy MA implementation) beats
