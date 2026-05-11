@@ -109,6 +109,58 @@ def bench_seasonal_decompose():
         report("seasonal_decompose *", n, f"period={period}", secs)
 
 
+def bench_batched():
+    """Loop the single-series statsmodels routines over P series — the
+    equivalent of rust-stats' stl_batch / seasonal_decompose_batch /
+    loess_batch. statsmodels has no built-in multi-column variant."""
+    rng = np.random.default_rng(0xABCD)
+
+    def make_series_set(n, p, period):
+        # Match the rust-side generator structure (trend + sin + noise).
+        i = np.arange(n)
+        out = np.empty((p, n))
+        for j in range(p):
+            phase = 2 * np.pi * (i % period) / period
+            out[j] = (
+                10.0 + 0.05 * i + 3.0 * np.sin(phase)
+                + 0.5 * rng.standard_normal(n)
+            )
+        return out
+
+    for n, p, period, iters in [(1_000, 50, 12, 20), (720, 50, 12, 30), (2_880, 50, 24, 10)]:
+        series = make_series_set(n, p, period)
+
+        def fn():
+            for j in range(p):
+                STL(series[j], period=period, robust=False).fit(
+                    inner_iter=2, outer_iter=0
+                )
+        secs = time_iters(iters, fn)
+        report("stl_batch (loop)",   n, f"p={p} period={period}", secs)
+
+    for n, p, period, iters in [(1_000, 50, 12, 20), (720, 50, 12, 30), (2_880, 50, 24, 10)]:
+        series = make_series_set(n, p, period)
+
+        def fn():
+            for j in range(p):
+                seasonal_decompose(
+                    series[j], period=period, model="additive",
+                    two_sided=True, extrapolate_trend=0,
+                )
+        secs = time_iters(iters, fn)
+        report("seasonal_decompose_batch", n, f"p={p} period={period}", secs)
+
+    for n, p, iters in [(1_000, 50, 20), (5_000, 50, 5)]:
+        series = make_series_set(n, p, 12)
+        x = np.arange(n, dtype=float)
+
+        def fn():
+            for j in range(p):
+                lowess(series[j], x, frac=0.3, it=0, return_sorted=False)
+        secs = time_iters(iters, fn)
+        report("loess_batch (loop)", n, f"p={p} span=0.3", secs)
+
+
 def main():
     print("# statsmodels benchmark")
     print()
@@ -119,6 +171,8 @@ def main():
     bench_stl()
     print()
     bench_seasonal_decompose()
+    print()
+    bench_batched()
 
 
 if __name__ == "__main__":

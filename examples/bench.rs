@@ -138,6 +138,63 @@ fn bench_seasonal_decompose() {
     }
 }
 
+#[cfg(feature = "arrow")]
+fn bench_batched() {
+    use arrow::array::{Array, Float64Array, RecordBatch};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use rust_stats::arrow_compat;
+    use std::sync::Arc;
+
+    fn make_batch(n: usize, p: usize, period: usize) -> RecordBatch {
+        let mut fields = Vec::with_capacity(p);
+        let mut cols: Vec<Arc<dyn Array>> = Vec::with_capacity(p);
+        for j in 0..p {
+            let s = series_with_seasonality(n, period, 0xABCD ^ (j as u64));
+            fields.push(Field::new(format!("c{j}"), DataType::Float64, true));
+            cols.push(Arc::new(Float64Array::from(s)));
+        }
+        RecordBatch::try_new(Arc::new(Schema::new(fields)), cols).unwrap()
+    }
+
+    for &(n, p, period, iters) in
+        &[(1_000usize, 50usize, 12usize, 20), (720, 50, 12, 30), (2_880, 50, 24, 10)]
+    {
+        let batch = make_batch(n, p, period);
+
+        let secs = time_iters(iters, || {
+            let _ = arrow_compat::stl_batch(&batch, StlOpts::new(period as u32)).unwrap();
+        });
+        report("stl_batch (rayon)",   n, &format!("p={p} period={period}"), secs);
+    }
+
+    for &(n, p, period, iters) in
+        &[(1_000usize, 50usize, 12usize, 20), (720, 50, 12, 30), (2_880, 50, 24, 10)]
+    {
+        let batch = make_batch(n, p, period);
+        let secs = time_iters(iters, || {
+            let _ = arrow_compat::seasonal_decompose_batch(
+                &batch,
+                SeasonalDecomposeOpts::new(period as u32),
+            )
+            .unwrap();
+        });
+        report("seasonal_decompose_batch", n, &format!("p={p} period={period}"), secs);
+    }
+
+    for &(n, p, iters) in &[(1_000usize, 50usize, 20), (5_000, 50, 5)] {
+        let batch = make_batch(n, p, 12);
+        let secs = time_iters(iters, || {
+            let _ = arrow_compat::loess_batch(&batch, 0.3, 1).unwrap();
+        });
+        report("loess_batch (rayon)", n, &format!("p={p} span=0.3"), secs);
+    }
+}
+
+#[cfg(not(feature = "arrow"))]
+fn bench_batched() {
+    println!("(skipping batched bench — rebuild with --features arrow)");
+}
+
 fn main() {
     println!("# rust-stats benchmark");
     println!();
@@ -148,4 +205,6 @@ fn main() {
     bench_stl();
     println!();
     bench_seasonal_decompose();
+    println!();
+    bench_batched();
 }

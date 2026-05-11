@@ -129,17 +129,37 @@ Wall-clock per call, median of warmed runs, on **Apple M2 Pro / macOS**
 | seasonal_decompose (×)    | n=720,  period=12  | 0.004 ms | 0.125 ms |  31×   |
 | seasonal_decompose (×)    | n=2 880, period=24 | 0.024 ms | 0.230 ms |   9.6× |
 
+### Batched (50 series per call)
+
+Decomposing 50 independent series at once. rust-stats parallelises over
+columns with rayon (`arrow_compat::*_batch`, `arrow` feature enabled);
+statsmodels has no native batched form, so the Python column is a
+straight Python loop over the same 50 series.
+
+| Operation | Size | rust-stats `*_batch` | statsmodels loop | Speedup |
+| --- | --- | ---: | ---: | ---: |
+| `stl_batch`                | 50 × n=720,   period=12 |   5.6 ms |    77.8 ms |  14× |
+| `stl_batch`                | 50 × n=1 000, period=12 |   7.6 ms |   108.1 ms |  14× |
+| `stl_batch`                | 50 × n=2 880, period=24 |  30.0 ms |   586.0 ms |  20× |
+| `seasonal_decompose_batch` | 50 × n=720,   period=12 |   0.17 ms |    5.98 ms |  35× |
+| `seasonal_decompose_batch` | 50 × n=1 000, period=12 |   0.16 ms |    5.91 ms |  37× |
+| `seasonal_decompose_batch` | 50 × n=2 880, period=24 |   0.40 ms |   10.9 ms |  27× |
+| `loess_batch`              | 50 × n=1 000, span=0.3  |  13.6 ms |   385.4 ms |  28× |
+| `loess_batch`              | 50 × n=5 000, span=0.3  | 329.2 ms |  4041.9 ms |  12× |
+
 Reproduce with:
 
 ```sh
-cargo run --release --example bench
+cargo run --release --example bench                       # core benches
+cargo run --release --features arrow --example bench      # adds batched section
 python3 tests/golden/bench_statsmodels.py
 ```
 
 OLS times are close because both implementations call into LAPACK-class
 routines (faer / OpenBLAS) — the Rust win comes from less per-call setup.
 LOESS gains a parallel inner loop. `seasonal_decompose` is an O(n) routine
-where Python-side overhead dominates at small n.
+where Python-side overhead dominates at small n. Batched variants add a
+second layer of parallelism (rayon over columns) for multi-series workloads.
 
 ## License
 
