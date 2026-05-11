@@ -1,4 +1,3 @@
-#![cfg_attr(feature = "simd", feature(portable_simd))]
 //! rust-stats: pure-Rust statistical modeling.
 //!
 //! Smoothing and seasonal-trend decomposition: LOESS, Cleveland 1990 STL,

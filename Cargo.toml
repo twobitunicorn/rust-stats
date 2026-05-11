@@ -10,14 +10,17 @@ thiserror = "2"
 rayon = "1.10"
 arrow  = { version = "58", optional = true, default-features = false }
 polars = { version = "0.53", optional = true, default-features = false }
+pulp   = { version = "0.22", optional = true }
 
 [features]
 default = []
 arrow   = ["dep:arrow"]
 polars  = ["dep:polars"]
-# Enable the cross-column SIMD LOESS kernel. Requires nightly Rust
-# (uses the unstable `std::simd` / `portable_simd` API).
-simd = []
+# Enable the SIMD kernels for the transforms (center / z_score /
+# min_max_scale) and the cross-column LOESS batch. Backed by `pulp`,
+# which compiles on stable Rust and dispatches to the best available
+# ISA (SSE2 / AVX2 / AVX-512 on x86_64, NEON on aarch64) at runtime.
+simd = ["dep:pulp"]
 
 [dev-dependencies]
 serde = { version = "1", features = ["derive"] }

@@ -107,6 +107,127 @@ def bench_batched():
         report("loess_batch (loop)", n, f"p={p} span=0.3", secs)
 
 
+# ── center  ↔  sklearn StandardScaler(with_std=False) ───────────────────
+
+def bench_center():
+    from sklearn.preprocessing import StandardScaler
+    rng = np.random.default_rng(0xC1)
+    for n, iters in [(10_000, 200), (100_000, 100), (1_000_000, 30)]:
+        y = rng.standard_normal(n).reshape(-1, 1)
+        sc = StandardScaler(with_std=False)
+        def fn():
+            sc.fit_transform(y)
+        secs = time_iters(iters, fn)
+        report("center (sklearn)", n, "", secs)
+
+
+# ── z_score  ↔  sklearn StandardScaler (ddof=0; differs slightly from R) ─
+
+def bench_z_score():
+    from sklearn.preprocessing import StandardScaler
+    rng = np.random.default_rng(0xC2)
+    for n, iters in [(10_000, 200), (100_000, 100), (1_000_000, 30)]:
+        y = rng.standard_normal(n).reshape(-1, 1)
+        sc = StandardScaler()
+        def fn():
+            sc.fit_transform(y)
+        secs = time_iters(iters, fn)
+        report("z_score (sklearn)", n, "", secs)
+
+
+# ── min_max_scale  ↔  sklearn MinMaxScaler ─────────────────────────────
+
+def bench_min_max():
+    from sklearn.preprocessing import MinMaxScaler
+    rng = np.random.default_rng(0xC3)
+    for n, iters in [(10_000, 200), (100_000, 100), (1_000_000, 30)]:
+        y = rng.standard_normal(n).reshape(-1, 1)
+        sc = MinMaxScaler()
+        def fn():
+            sc.fit_transform(y)
+        secs = time_iters(iters, fn)
+        report("min_max_scale (sklearn)", n, "", secs)
+
+
+# ── box_cox  ↔  scipy.stats.boxcox(x, lmbda=) ─────────────────────────
+#
+# scipy.stats.boxcox raises on non-positive y. We use exp(rnorm) + 0.5
+# (matching the Rust bench) to keep everything strictly positive.
+
+def bench_box_cox():
+    from scipy import stats
+    rng = np.random.default_rng(0xC4)
+    for n, iters in [(10_000, 100), (100_000, 30), (1_000_000, 5)]:
+        y = np.exp(rng.standard_normal(n)) + 0.5
+        for lmbda in (0.0, 0.5, 2.0):
+            def fn(_l=lmbda):
+                stats.boxcox(y, lmbda=_l)
+            secs = time_iters(iters, fn)
+            report("box_cox (scipy)", n, f"lambda={lmbda}", secs)
+
+
+# ── Holt-Winters  ↔  statsmodels ExponentialSmoothing(...).fit(optimized=False) ─
+
+def bench_holt_winters():
+    from statsmodels.tsa.holtwinters import (
+        ExponentialSmoothing,
+        Holt,
+        SimpleExpSmoothing,
+    )
+
+    for n, period, iters in [(144, 12, 200), (720, 12, 100), (2_880, 24, 30)]:
+        y = series_with_seasonality(n, period, seed=0xC5)
+        y_pos = np.abs(y) + 1.0  # strictly positive for multiplicative
+
+        def fn_ses():
+            SimpleExpSmoothing(y, initialization_method="heuristic").fit(
+                smoothing_level=0.5, optimized=False
+            )
+        secs = time_iters(iters, fn_ses)
+        report("hw SES", n, f"period={period}", secs)
+
+        def fn_holt():
+            Holt(y, initialization_method="heuristic").fit(
+                smoothing_level=0.5,
+                smoothing_trend=0.1,
+                optimized=False,
+            )
+        secs = time_iters(iters, fn_holt)
+        report("hw Holt linear", n, f"period={period}", secs)
+
+        def fn_add():
+            ExponentialSmoothing(
+                y,
+                trend="add",
+                seasonal="add",
+                seasonal_periods=period,
+                initialization_method="heuristic",
+            ).fit(
+                smoothing_level=0.5,
+                smoothing_trend=0.1,
+                smoothing_seasonal=0.2,
+                optimized=False,
+            )
+        secs = time_iters(iters, fn_add)
+        report("hw additive", n, f"period={period}", secs)
+
+        def fn_mul():
+            ExponentialSmoothing(
+                y_pos,
+                trend="add",
+                seasonal="mul",
+                seasonal_periods=period,
+                initialization_method="heuristic",
+            ).fit(
+                smoothing_level=0.5,
+                smoothing_trend=0.1,
+                smoothing_seasonal=0.2,
+                optimized=False,
+            )
+        secs = time_iters(iters, fn_mul)
+        report("hw multiplicative", n, f"period={period}", secs)
+
+
 def main():
     print("# statsmodels benchmark (rust-stats subset)")
     print()
@@ -117,6 +238,16 @@ def main():
     bench_seasonal_decompose()
     print()
     bench_batched()
+    print()
+    bench_center()
+    print()
+    bench_z_score()
+    print()
+    bench_min_max()
+    print()
+    bench_box_cox()
+    print()
+    bench_holt_winters()
 
 
 if __name__ == "__main__":

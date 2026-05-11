@@ -130,8 +130,122 @@ bench_batched <- function() {
   }
 }
 
+# ── center  ↔  scale(x, scale = FALSE) ────────────────────────────────
+
+bench_center <- function() {
+  for (cfg in list(c(10000, 200), c(100000, 100), c(1000000, 30))) {
+    n <- cfg[1]; iters <- cfg[2]
+    set.seed(0xC1)
+    y <- rnorm(n)
+    secs <- time_iters(iters, function() {
+      invisible(scale(y, center = TRUE, scale = FALSE))
+    })
+    report("center (scale)", n, "", secs)
+  }
+}
+
+# ── z_score  ↔  scale(x)  (ddof = 1; same as rust-stats) ──────────────
+
+bench_z_score <- function() {
+  for (cfg in list(c(10000, 200), c(100000, 100), c(1000000, 30))) {
+    n <- cfg[1]; iters <- cfg[2]
+    set.seed(0xC2)
+    y <- rnorm(n)
+    secs <- time_iters(iters, function() {
+      invisible(scale(y))
+    })
+    report("z_score (scale)", n, "", secs)
+  }
+}
+
+# ── min_max_scale  ↔  (x - min(x)) / diff(range(x)) ───────────────────
+
+bench_min_max <- function() {
+  for (cfg in list(c(10000, 200), c(100000, 100), c(1000000, 30))) {
+    n <- cfg[1]; iters <- cfg[2]
+    set.seed(0xC3)
+    y <- rnorm(n)
+    secs <- time_iters(iters, function() {
+      rng <- range(y)
+      invisible((y - rng[1]) / (rng[2] - rng[1]))
+    })
+    report("min_max_scale", n, "", secs)
+  }
+}
+
+# ── box_cox  ↔  forecast::BoxCox if installed, else closed-form ───────
+
+bench_box_cox <- function() {
+  use_forecast <- requireNamespace("forecast", quietly = TRUE)
+  for (cfg in list(c(10000, 100), c(100000, 30), c(1000000, 5))) {
+    n <- cfg[1]; iters <- cfg[2]
+    set.seed(0xC4)
+    y <- exp(rnorm(n)) + 0.5  # strictly positive
+    for (lmbda in c(0.0, 0.5, 2.0)) {
+      fn <- if (use_forecast) {
+        function() invisible(forecast::BoxCox(y, lambda = lmbda))
+      } else {
+        function() {
+          if (lmbda == 0.0) invisible(log(y))
+          else invisible((y^lmbda - 1) / lmbda)
+        }
+      }
+      secs <- time_iters(iters, fn)
+      report("box_cox", n, sprintf("lambda=%g", lmbda), secs)
+    }
+  }
+}
+
+# ── HoltWinters  ↔  stats::HoltWinters(x, alpha, beta, gamma) ─────────
+#
+# R's HoltWinters() requires a ts() object and seeds level/trend by
+# regression on the first two seasons; we fix the smoothing constants so
+# it doesn't optimize. SES and Holt's linear are spelled with
+# `gamma=FALSE` / `beta=FALSE` respectively.
+
+bench_holt_winters <- function() {
+  for (cfg in list(c(144, 12, 200), c(720, 12, 100), c(2880, 24, 30))) {
+    n <- cfg[1]; period <- cfg[2]; iters <- cfg[3]
+    y_raw <- series_with_seasonality(n, period, seed = 0xC5)
+    y_pos <- abs(y_raw) + 1  # strictly positive for multiplicative
+
+    # SES — needs n > 2*period for HoltWinters(); fall back to closed-form
+    # SES loop when too short. (Tiny series like n=144 with period=12 are
+    # fine, but the API still demands period >= 2.)
+    y_ts <- ts(y_raw, frequency = period)
+    y_ts_pos <- ts(y_pos, frequency = period)
+
+    secs <- time_iters(iters, function() {
+      invisible(HoltWinters(y_ts, alpha = 0.5, beta = FALSE, gamma = FALSE))
+    })
+    report("hw SES", n, sprintf("period=%d", period), secs)
+
+    secs <- time_iters(iters, function() {
+      invisible(HoltWinters(y_ts, alpha = 0.5, beta = 0.1, gamma = FALSE))
+    })
+    report("hw Holt linear", n, sprintf("period=%d", period), secs)
+
+    secs <- time_iters(iters, function() {
+      invisible(HoltWinters(y_ts, alpha = 0.5, beta = 0.1, gamma = 0.2,
+                            seasonal = "additive"))
+    })
+    report("hw additive", n, sprintf("period=%d", period), secs)
+
+    secs <- time_iters(iters, function() {
+      invisible(HoltWinters(y_ts_pos, alpha = 0.5, beta = 0.1, gamma = 0.2,
+                            seasonal = "multiplicative"))
+    })
+    report("hw multiplicative", n, sprintf("period=%d", period), secs)
+  }
+}
+
 cat("# R benchmark\n\n")
 bench_loess(); cat("\n")
 bench_stl(); cat("\n")
 bench_seasonal_decompose(); cat("\n")
-bench_batched()
+bench_batched(); cat("\n")
+bench_center(); cat("\n")
+bench_z_score(); cat("\n")
+bench_min_max(); cat("\n")
+bench_box_cox(); cat("\n")
+bench_holt_winters()

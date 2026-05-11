@@ -146,6 +146,214 @@ pub fn box_cox(y: &[f64], lmbda: f64) -> Result<Vec<f64>, BoxCoxError> {
     }
 }
 
+// ============================================================================
+// SIMD kernels — backed by `pulp` (stable Rust, runtime ISA dispatch).
+//
+// `pulp::Arch::new()` selects the best SIMD level at runtime (SSE2 /
+// AVX2 / AVX-512 on x86_64, NEON on aarch64, scalar fallback elsewhere).
+// `S::F64_LANES` is the lane count of the chosen target.
+//
+// All kernels preserve the scalar contracts: NaN inputs propagate to the
+// same output positions, aggregates are computed over the finite entries
+// only, and degenerate inputs (empty / constant / fewer than two finite
+// values) produce the same zeros-or-NaN pattern as the scalar path.
+//
+// Transcendentals (`ln`, `pow`) are not part of pulp's f64 vocabulary,
+// so `box_cox` is not vectorised here.
+// ============================================================================
+
+#[cfg(feature = "simd")]
+mod simd_impl {
+    use pulp::{Arch, Simd, WithSimd};
+
+    /// Lanewise `is_finite` mask: `abs(v) < +∞` is true for every finite
+    /// f64 and false for ±∞ and NaN (NaN < anything is always false).
+    #[inline(always)]
+    fn finite_mask<S: Simd>(simd: S, v: S::f64s) -> S::m64s {
+        simd.less_than_f64s(simd.abs_f64s(v), simd.splat_f64s(f64::INFINITY))
+    }
+
+    struct FiniteSumCount<'a> {
+        y: &'a [f64],
+    }
+    impl<'a> WithSimd for FiniteSumCount<'a> {
+        type Output = (f64, usize);
+        #[inline(always)]
+        fn with_simd<S: Simd>(self, simd: S) -> Self::Output {
+            let (head, tail) = S::as_simd_f64s(self.y);
+            let zero = simd.splat_f64s(0.0);
+            let one = simd.splat_f64s(1.0);
+            let mut sum_v = zero;
+            let mut cnt_v = zero;
+            for &v in head {
+                let m = finite_mask(simd, v);
+                sum_v = simd.add_f64s(sum_v, simd.select_f64s(m, v, zero));
+                cnt_v = simd.add_f64s(cnt_v, simd.select_f64s(m, one, zero));
+            }
+            let mut sum = simd.reduce_sum_f64s(sum_v);
+            let mut cnt = simd.reduce_sum_f64s(cnt_v) as usize;
+            for &v in tail {
+                if v.is_finite() {
+                    sum += v;
+                    cnt += 1;
+                }
+            }
+            (sum, cnt)
+        }
+    }
+
+    struct FiniteSumSq<'a> {
+        y: &'a [f64],
+        mean: f64,
+    }
+    impl<'a> WithSimd for FiniteSumSq<'a> {
+        type Output = f64;
+        #[inline(always)]
+        fn with_simd<S: Simd>(self, simd: S) -> Self::Output {
+            let (head, tail) = S::as_simd_f64s(self.y);
+            let mean_v = simd.splat_f64s(self.mean);
+            let zero = simd.splat_f64s(0.0);
+            let mut acc = zero;
+            for &v in head {
+                let m = finite_mask(simd, v);
+                let d = simd.sub_f64s(v, mean_v);
+                let dd = simd.mul_f64s(d, d);
+                acc = simd.add_f64s(acc, simd.select_f64s(m, dd, zero));
+            }
+            let mut s = simd.reduce_sum_f64s(acc);
+            for &v in tail {
+                if v.is_finite() {
+                    let d = v - self.mean;
+                    s += d * d;
+                }
+            }
+            s
+        }
+    }
+
+    struct FiniteMinMax<'a> {
+        y: &'a [f64],
+    }
+    impl<'a> WithSimd for FiniteMinMax<'a> {
+        type Output = (f64, f64);
+        #[inline(always)]
+        fn with_simd<S: Simd>(self, simd: S) -> Self::Output {
+            let (head, tail) = S::as_simd_f64s(self.y);
+            let pos_inf = simd.splat_f64s(f64::INFINITY);
+            let neg_inf = simd.splat_f64s(f64::NEG_INFINITY);
+            let mut lo_v = pos_inf;
+            let mut hi_v = neg_inf;
+            for &v in head {
+                let m = finite_mask(simd, v);
+                lo_v = simd.min_f64s(lo_v, simd.select_f64s(m, v, pos_inf));
+                hi_v = simd.max_f64s(hi_v, simd.select_f64s(m, v, neg_inf));
+            }
+            let mut lo = simd.reduce_min_f64s(lo_v);
+            let mut hi = simd.reduce_max_f64s(hi_v);
+            for &v in tail {
+                if v.is_finite() {
+                    if v < lo {
+                        lo = v;
+                    }
+                    if v > hi {
+                        hi = v;
+                    }
+                }
+            }
+            // If no finite value was seen at all, both extremes are still
+            // their initialisers — collapse to (0, 0) to match the scalar
+            // contract.
+            if lo == f64::INFINITY && hi == f64::NEG_INFINITY {
+                (0.0, 0.0)
+            } else {
+                (lo, hi)
+            }
+        }
+    }
+
+    struct AffineInto<'a> {
+        y: &'a [f64],
+        out: &'a mut [f64],
+        c: f64,
+        k: f64,
+    }
+    impl<'a> WithSimd for AffineInto<'a> {
+        type Output = ();
+        #[inline(always)]
+        fn with_simd<S: Simd>(self, simd: S) {
+            let Self { y, out, c, k } = self;
+            let c_v = simd.splat_f64s(c);
+            let k_v = simd.splat_f64s(k);
+            let (y_head, y_tail) = S::as_simd_f64s(y);
+            let (o_head, o_tail) = S::as_mut_simd_f64s(out);
+            for (yv, ov) in y_head.iter().zip(o_head.iter_mut()) {
+                *ov = simd.mul_f64s(simd.sub_f64s(*yv, c_v), k_v);
+            }
+            for (yv, ov) in y_tail.iter().zip(o_tail.iter_mut()) {
+                *ov = (*yv - c) * k;
+            }
+        }
+    }
+
+    pub(super) fn center(y: &[f64]) -> Vec<f64> {
+        let arch = Arch::new();
+        let (sum, cnt) = arch.dispatch(FiniteSumCount { y });
+        let mean = if cnt == 0 { 0.0 } else { sum / cnt as f64 };
+        let mut out = vec![0.0; y.len()];
+        arch.dispatch(AffineInto { y, out: &mut out, c: mean, k: 1.0 });
+        out
+    }
+
+    pub(super) fn z_score(y: &[f64]) -> Vec<f64> {
+        let arch = Arch::new();
+        let (sum, cnt) = arch.dispatch(FiniteSumCount { y });
+        let mean = if cnt == 0 { 0.0 } else { sum / cnt as f64 };
+        let std = if cnt < 2 {
+            0.0
+        } else {
+            (arch.dispatch(FiniteSumSq { y, mean }) / (cnt - 1) as f64).sqrt()
+        };
+        // std == 0 → multiplying by 0 inside `AffineInto` preserves NaN
+        // (NaN * 0 = NaN) and zeros every finite position — the same as
+        // the scalar `(v - mean) * 0.0` contract.
+        let inv = if std == 0.0 { 0.0 } else { 1.0 / std };
+        let mut out = vec![0.0; y.len()];
+        arch.dispatch(AffineInto { y, out: &mut out, c: mean, k: inv });
+        out
+    }
+
+    pub(super) fn min_max_scale(y: &[f64]) -> Vec<f64> {
+        let arch = Arch::new();
+        let (lo, hi) = arch.dispatch(FiniteMinMax { y });
+        let range = hi - lo;
+        let inv = if range == 0.0 { 0.0 } else { 1.0 / range };
+        let mut out = vec![0.0; y.len()];
+        arch.dispatch(AffineInto { y, out: &mut out, c: lo, k: inv });
+        out
+    }
+}
+
+/// SIMD-accelerated [`center`]. Requires the `simd` feature (nightly).
+/// Numerically identical to the scalar implementation up to FP
+/// associativity in the SIMD reduction.
+#[cfg(feature = "simd")]
+pub fn center_simd(y: &[f64]) -> Vec<f64> {
+    simd_impl::center(y)
+}
+
+/// SIMD-accelerated [`z_score`]. Requires the `simd` feature (nightly).
+#[cfg(feature = "simd")]
+pub fn z_score_simd(y: &[f64]) -> Vec<f64> {
+    simd_impl::z_score(y)
+}
+
+/// SIMD-accelerated [`min_max_scale`]. Requires the `simd` feature
+/// (nightly).
+#[cfg(feature = "simd")]
+pub fn min_max_scale_simd(y: &[f64]) -> Vec<f64> {
+    simd_impl::min_max_scale(y)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,5 +432,88 @@ mod tests {
         assert_eq!(out[0], 0.0);
         assert!(out[1].is_nan());
         assert_relative_eq!(out[2], 7.5);
+    }
+
+    // --- SIMD parity ---
+    //
+    // When the `simd` feature is on, the `_simd` kernels must produce
+    // bit-close output to the scalar kernels. We test on a mixed-size
+    // input that crosses the 4-lane boundary and includes NaN to
+    // exercise the masked finite reductions.
+
+    #[cfg(feature = "simd")]
+    fn parity_check(scalar: &[f64], simd: &[f64], ctx: &str) {
+        assert_eq!(scalar.len(), simd.len(), "{ctx}: length mismatch");
+        for (i, (a, b)) in scalar.iter().zip(simd.iter()).enumerate() {
+            if a.is_nan() {
+                assert!(b.is_nan(), "{ctx}[{i}]: scalar NaN but simd {b}");
+            } else {
+                assert!(
+                    (a - b).abs() < 1e-12,
+                    "{ctx}[{i}]: scalar {a}, simd {b}, |Δ| = {}",
+                    (a - b).abs()
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "simd")]
+    fn make_fixture() -> Vec<f64> {
+        // length 11 — guarantees a chunks_exact(4) remainder of 3
+        vec![
+            1.0, -2.5, 3.25, f64::NAN, 5.5, 0.0, -7.125, 8.75,
+            f64::NAN, 11.5, -3.0,
+        ]
+    }
+
+    #[cfg(feature = "simd")]
+    #[test]
+    fn simd_center_matches_scalar() {
+        let y = make_fixture();
+        parity_check(&center(&y), &super::center_simd(&y), "center");
+    }
+
+    #[cfg(feature = "simd")]
+    #[test]
+    fn simd_z_score_matches_scalar() {
+        let y = make_fixture();
+        parity_check(&z_score(&y), &super::z_score_simd(&y), "z_score");
+
+        // Constant path: simd must also collapse to zeros.
+        let constant = vec![4.2; 9];
+        parity_check(
+            &z_score(&constant),
+            &super::z_score_simd(&constant),
+            "z_score constant",
+        );
+    }
+
+    #[cfg(feature = "simd")]
+    #[test]
+    fn simd_min_max_matches_scalar() {
+        let y = make_fixture();
+        parity_check(
+            &min_max_scale(&y),
+            &super::min_max_scale_simd(&y),
+            "min_max",
+        );
+    }
+
+    #[cfg(feature = "simd")]
+    #[test]
+    fn simd_handles_empty_and_short_inputs() {
+        // empty
+        assert!(super::center_simd(&[]).is_empty());
+        assert!(super::z_score_simd(&[]).is_empty());
+        assert!(super::min_max_scale_simd(&[]).is_empty());
+        // shorter than one SIMD lane group
+        let y = vec![1.0, 2.0, 3.0];
+        parity_check(&center(&y), &super::center_simd(&y), "short center");
+        parity_check(&z_score(&y), &super::z_score_simd(&y), "short z_score");
+        parity_check(
+            &min_max_scale(&y),
+            &super::min_max_scale_simd(&y),
+            "short min_max",
+        );
     }
 }
