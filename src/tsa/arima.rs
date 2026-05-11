@@ -38,17 +38,47 @@ pub struct ArimaOpts {
     pub d: u32,
     /// MA order. `0` ≤ q ≤ 10.
     pub q: u32,
+    /// Seasonal AR order `P`. `0` ≤ P ≤ 10. Ignored when
+    /// `seasonal_period == 0`.
+    pub seasonal_p: u32,
+    /// Seasonal differencing order `D`. `0` ≤ D ≤ 2.
+    pub seasonal_d: u32,
+    /// Seasonal MA order `Q`. `0` ≤ Q ≤ 10.
+    pub seasonal_q: u32,
+    /// Seasonal period `m`. `0` means no seasonal terms (the
+    /// non-seasonal ARIMA(p, d, q) model).
+    pub seasonal_period: u32,
     /// Include a constant (intercept) term in the differenced series.
-    /// When `d > 0` this is the drift of the integrated process.
+    /// When `d > 0` (or `D > 0`) this is the drift of the integrated
+    /// process.
     pub include_constant: bool,
 }
 
 impl ArimaOpts {
+    /// Build a non-seasonal ARIMA(p, d, q).
     pub fn new(p: u32, d: u32, q: u32) -> Self {
         Self {
             p,
             d,
             q,
+            seasonal_p: 0,
+            seasonal_d: 0,
+            seasonal_q: 0,
+            seasonal_period: 0,
+            include_constant: true,
+        }
+    }
+
+    /// Build a seasonal ARIMA(p, d, q)(P, D, Q)[m].
+    pub fn seasonal(p: u32, d: u32, q: u32, big_p: u32, big_d: u32, big_q: u32, m: u32) -> Self {
+        Self {
+            p,
+            d,
+            q,
+            seasonal_p: big_p,
+            seasonal_d: big_d,
+            seasonal_q: big_q,
+            seasonal_period: m,
             include_constant: true,
         }
     }
@@ -63,6 +93,12 @@ pub struct ArimaFit {
     /// `y_t = … + ε_t + θ₁ ε_{t−1} + …` (matches R `arima` /
     /// statsmodels `SARIMAX`).
     pub theta: Vec<f64>,
+    /// Seasonal AR coefficients `[Φ₁, …, Φ_P]` (length `P`). Empty for
+    /// non-seasonal fits.
+    pub seasonal_phi: Vec<f64>,
+    /// Seasonal MA coefficients `[Θ₁, …, Θ_Q]` (length `Q`). Empty for
+    /// non-seasonal fits.
+    pub seasonal_theta: Vec<f64>,
     /// Exogenous-regressor coefficients (one per `exog` column, in the
     /// order they were passed). Empty when the model was fitted without
     /// exogenous inputs.
@@ -209,12 +245,25 @@ pub fn arima_with_exog(
 }
 
 /// Internal: ARIMA fit with no exog. Pulled out so `arima_with_exog`
-/// can reuse the body after stage 1.
+/// can reuse the body after stage 1. Handles both non-seasonal
+/// ARIMA(p, d, q) and seasonal ARIMA(p, d, q)(P, D, Q)[m] uniformly via
+/// polynomial convolution.
 fn arima_no_exog(y: &[f64], opts: ArimaOpts) -> Result<ArimaFit, ArimaError> {
-    let n = y.len();
-    let m = opts.p.max(opts.q) as usize;
+    let p = opts.p as usize;
+    let q = opts.q as usize;
     let d = opts.d as usize;
-    let min_n = d + m + 2; // need at least a few effective obs
+    let mm = opts.seasonal_period as usize;
+    let has_seasonal = mm > 0;
+    let big_p = if has_seasonal { opts.seasonal_p as usize } else { 0 };
+    let big_d = if has_seasonal { opts.seasonal_d as usize } else { 0 };
+    let big_q = if has_seasonal { opts.seasonal_q as usize } else { 0 };
+
+    let n = y.len();
+    let ar_order = p + big_p * mm;
+    let ma_order = q + big_q * mm;
+    let recursion_order = ar_order.max(ma_order);
+    let total_diff = d + big_d * mm;
+    let min_n = total_diff + recursion_order + 2;
     if n < min_n {
         return Err(ArimaError::SeriesTooShort {
             n,
@@ -228,12 +277,11 @@ fn arima_no_exog(y: &[f64], opts: ArimaOpts) -> Result<ArimaFit, ArimaError> {
         return Err(ArimaError::NonFinite);
     }
 
-    // 1. Difference d times → w of length n - d.
-    let w = difference(y, d);
+    // 1. Full differencing: seasonal first, then non-seasonal.
+    let w = full_difference(y, d, big_d, mm);
     let n_w = w.len();
 
-    // 2. Optionally subtract mean of w (so the optimiser only sees
-    //    centered series). Reattach later as intercept.
+    // 2. Optionally subtract mean of w.
     let intercept = if opts.include_constant {
         w.iter().sum::<f64>() / n_w as f64
     } else {
@@ -241,51 +289,62 @@ fn arima_no_exog(y: &[f64], opts: ArimaOpts) -> Result<ArimaFit, ArimaError> {
     };
     let w_centered: Vec<f64> = w.iter().map(|v| v - intercept).collect();
 
-    let p = opts.p as usize;
-    let q = opts.q as usize;
-
-    // 3. Hannan-Rissanen seed: estimate (φ, θ) by two-step OLS.
+    // 3. Hannan-Rissanen seed for the non-seasonal block. Seasonal seeds
+    //    start at zero — the optimiser refines them.
     let (phi_seed, theta_seed) = hannan_rissanen_seed(&w_centered, p, q)?;
 
-    // 4. Map seed coefficients → unconstrained ℝ^(p+q) starting point
-    //    for Nelder-Mead.
-    let mut x0 = vec![0.0f64; p + q];
+    // 4. Pack into unconstrained ℝ^(p + P + q + Q) starting vector
+    //    [φ_real, Φ_real, θ_real, Θ_real].
+    let pn = p + big_p + q + big_q;
+    let mut x0 = vec![0.0f64; pn];
+    let mut idx = 0;
     let phi_pacf = transform::ar_poly_to_pacf(&phi_seed);
+    for v in &phi_pacf {
+        x0[idx] = transform::pacf_to_real(*v);
+        idx += 1;
+    }
+    for _ in 0..big_p {
+        x0[idx] = 0.0;
+        idx += 1;
+    }
     let theta_pacf = transform::ma_poly_to_pacf(&theta_seed);
-    for i in 0..p {
-        x0[i] = transform::pacf_to_real(phi_pacf[i]);
+    for v in &theta_pacf {
+        x0[idx] = transform::pacf_to_real(*v);
+        idx += 1;
     }
-    for i in 0..q {
-        x0[p + i] = transform::pacf_to_real(theta_pacf[i]);
+    for _ in 0..big_q {
+        x0[idx] = 0.0;
+        idx += 1;
     }
 
-    // 5. Minimise CSS over the unconstrained space.
+    // 5. CSS minimisation over the unconstrained space.
     let css_obj = |x: &[f64]| -> f64 {
-        let (phi, theta) = unpack(x, p, q);
-        css_sse(&w_centered, &phi, &theta)
+        let (phi, phi_s, theta, theta_s) = unpack_full(x, p, big_p, q, big_q);
+        let total_ar = convolve_ar(&phi, &phi_s, mm);
+        let total_ma = convolve_ma(&theta, &theta_s, mm);
+        css_sse(&w_centered, &total_ar, &total_ma)
     };
+    let max_iter = 2_000 + 200 * pn;
     let (x_star, _f_star, converged) =
-        nelder_mead::minimize(&x0, &css_obj, 2_000, 1e-8);
+        nelder_mead::minimize(&x0, &css_obj, max_iter, 1e-8);
     if !converged {
-        return Err(ArimaError::OptimizationFailed { iters: 2_000 });
+        return Err(ArimaError::OptimizationFailed { iters: max_iter });
     }
-    let (phi, theta) = unpack(&x_star, p, q);
+    let (phi, phi_s, theta, theta_s) = unpack_full(&x_star, p, big_p, q, big_q);
 
-    // 6. Compute residuals/fitted on the centered, differenced series.
-    let eps = compute_eps(&w_centered, &phi, &theta);
-    let m_eff = n_w.saturating_sub(m);
-    let sse: f64 = eps.iter().skip(m).map(|e| e * e).sum();
+    // 6. Residuals/fitted on the centered, fully-differenced series.
+    let total_ar = convolve_ar(&phi, &phi_s, mm);
+    let total_ma = convolve_ma(&theta, &theta_s, mm);
+    let eps = compute_eps(&w_centered, &total_ar, &total_ma);
+    let m_eff = n_w.saturating_sub(recursion_order);
+    let sse: f64 = eps.iter().skip(recursion_order).map(|e| e * e).sum();
     let sigma2 = if m_eff > 0 { sse / m_eff as f64 } else { f64::NAN };
 
-    // 7. Lift fitted / residuals back to original scale (length n).
-    //    On the centered scale, fitted_w[t] = w_centered[t] - eps[t].
-    //    Add back intercept and integrate d times.
+    // 7. Lift fitted / residuals back to original scale.
     let fitted_w: Vec<f64> = (0..n_w).map(|t| w_centered[t] - eps[t] + intercept).collect();
-    let fitted = integrate(&fitted_w, &y[..d]);
+    let fitted = full_integrate_in_sample(y, &fitted_w, d, big_d, mm);
     let residuals: Vec<f64> = y.iter().zip(&fitted).map(|(a, b)| a - b).collect();
-    // Zero out start-up positions so callers don't read "fitted" from
-    // initial conditions.
-    let warmup = d + m;
+    let warmup = total_diff + recursion_order;
     let mut fitted = fitted;
     let mut residuals = residuals;
     for i in 0..warmup.min(n) {
@@ -293,15 +352,15 @@ fn arima_no_exog(y: &[f64], opts: ArimaOpts) -> Result<ArimaFit, ArimaError> {
         residuals[i] = 0.0;
     }
 
-    // 8. Information criteria. k = p + q + sigma2 + (1 if intercept).
-    let k = (p + q) as f64 + 1.0 + if opts.include_constant { 1.0 } else { 0.0 };
+    // 8. Information criteria.
+    let k = pn as f64 + 1.0 + if opts.include_constant { 1.0 } else { 0.0 };
     let log_lik =
         -0.5 * (m_eff as f64) * ((2.0 * std::f64::consts::PI * sigma2).ln() + 1.0);
     let aic = 2.0 * k - 2.0 * log_lik;
     let bic = (m_eff as f64).ln() * k - 2.0 * log_lik;
 
-    // 9. Snapshot tail state for forecasting.
-    let take_n = m.max(1);
+    // 9. Tail state for forecasting.
+    let take_n = recursion_order.max(1);
     let w_tail: Vec<f64> = w_centered
         .iter()
         .rev()
@@ -320,11 +379,13 @@ fn arima_no_exog(y: &[f64], opts: ArimaOpts) -> Result<ArimaFit, ArimaError> {
         .into_iter()
         .rev()
         .collect();
-    let last_obs: Vec<f64> = y[n.saturating_sub(d)..].to_vec();
+    let last_obs: Vec<f64> = y[n.saturating_sub(total_diff)..].to_vec();
 
     Ok(ArimaFit {
         phi,
         theta,
+        seasonal_phi: phi_s,
+        seasonal_theta: theta_s,
         beta: Vec::new(),
         intercept,
         sigma2,
@@ -385,29 +446,31 @@ impl ArimaFit {
     }
 
     fn forecast_exog_impl(&self, steps: usize, exog_future: &[&[f64]]) -> Vec<f64> {
-        let p = self.opts.p as usize;
-        let q = self.opts.q as usize;
         let d = self.opts.d as usize;
+        let mm = self.opts.seasonal_period as usize;
+        let big_d = if mm > 0 { self.opts.seasonal_d as usize } else { 0 };
 
-        // Forecast the centered differenced series.
+        // Build the combined AR / MA polynomials at forecast time.
+        let total_ar = convolve_ar(&self.phi, &self.seasonal_phi, mm);
+        let total_ma = convolve_ma(&self.theta, &self.seasonal_theta, mm);
+        let ar_order = total_ar.len();
+        let ma_order = total_ma.len();
+
         let mut w_tail = self.w_tail.clone();
         let mut eps_tail = self.eps_tail.clone();
         let mut w_forecasts = Vec::with_capacity(steps);
 
         for _ in 0..steps {
-            // AR contribution: sum_{i=1..p} φ_i · w_{t-i}
             let mut wf = 0.0;
-            for i in 0..p {
+            for i in 0..ar_order {
                 let idx = w_tail.len() - 1 - i;
-                wf += self.phi[i] * w_tail[idx];
+                wf += total_ar[i] * w_tail[idx];
             }
-            // MA contribution: sum_{i=1..q} θ_i · ε_{t-i}
-            for i in 0..q {
+            for i in 0..ma_order {
                 let idx = eps_tail.len() - 1 - i;
-                wf += self.theta[i] * eps_tail[idx];
+                wf += total_ma[i] * eps_tail[idx];
             }
             w_forecasts.push(wf);
-            // shift tails
             if !w_tail.is_empty() {
                 w_tail.rotate_left(1);
                 let last = w_tail.len() - 1;
@@ -421,16 +484,15 @@ impl ArimaFit {
         }
 
         // Re-add the differenced-series mean if any. For an ARIMAX fit
-        // the inner ARIMA was centered (its own intercept is 0), so this
-        // is the exog-free branch.
+        // the inner ARIMA was centered, so its intercept is 0.
         let inner_intercept = if self.beta.is_empty() { self.intercept } else { 0.0 };
         let w_forecasts: Vec<f64> = w_forecasts.iter().map(|v| v + inner_intercept).collect();
-        let mut out = integrate_from_last(&w_forecasts, &self.last_obs, d);
+        let mut out = full_integrate_from_tail(&w_forecasts, &self.last_obs, d, big_d, mm);
 
         // ARIMAX: add β₀ + β·x_future per horizon.
         if !self.beta.is_empty() {
             for h in 0..steps {
-                let mut adj = self.intercept; // β₀
+                let mut adj = self.intercept;
                 for (j, col) in exog_future.iter().enumerate() {
                     adj += self.beta[j] * col[h];
                 }
@@ -442,9 +504,18 @@ impl ArimaFit {
 
     fn intervals_for(&self, mean: Vec<f64>, steps: usize, alpha: f64) -> ForecastResult {
         let z = inv_phi(1.0 - alpha / 2.0);
-        let psi = psi_weights(&self.phi, &self.theta, steps);
+        // ψ-weights of the combined (seasonal × non-seasonal) ARMA.
+        let mm = self.opts.seasonal_period as usize;
+        let total_ar = convolve_ar(&self.phi, &self.seasonal_phi, mm);
+        let total_ma = convolve_ma(&self.theta, &self.seasonal_theta, mm);
+        let psi = psi_weights(&total_ar, &total_ma, steps);
+        // Both differencing levels broaden the prediction error. The
+        // integrating filter (1 − B)^{-d} (1 − B^m)^{-D} applied to the
+        // ψ-weights produces the running-sum / seasonal-running-sum
+        // sequence whose squared entries give Var(h).
         let d = self.opts.d as usize;
-        let psi_star = integrate_psi(&psi, d);
+        let big_d = if mm > 0 { self.opts.seasonal_d as usize } else { 0 };
+        let psi_star = integrate_psi_seasonal(&psi, d, big_d, mm);
         let mut variance = Vec::with_capacity(steps);
         let mut running = 0.0f64;
         for h in 0..steps {
@@ -494,23 +565,6 @@ fn psi_weights(phi: &[f64], theta: &[f64], len: usize) -> Vec<f64> {
         psi[k] = v;
     }
     psi
-}
-
-/// Cumulatively integrate `psi` `d` times — turns the stationary
-/// representation into the non-stationary one for ARIMA(p, d, q).
-fn integrate_psi(psi: &[f64], d: usize) -> Vec<f64> {
-    if d == 0 {
-        return psi.to_vec();
-    }
-    let mut cur: Vec<f64> = psi.to_vec();
-    for _ in 0..d {
-        let mut running = 0.0f64;
-        for v in cur.iter_mut() {
-            running += *v;
-            *v = running;
-        }
-    }
-    cur
 }
 
 /// Inverse standard normal CDF, Acklam's algorithm (accuracy ≈ 1.15e-9).
@@ -566,68 +620,189 @@ fn inv_phi(p: f64) -> f64 {
 // Differencing / integration
 // ----------------------------------------------------------------------
 
-fn difference(y: &[f64], d: usize) -> Vec<f64> {
+/// Apply the full differencing operator `(1 − B)^d (1 − B^m)^D` to `y`.
+/// Seasonal differencing runs first, then non-seasonal.
+fn full_difference(y: &[f64], d: usize, big_d: usize, m: usize) -> Vec<f64> {
     let mut cur: Vec<f64> = y.to_vec();
+    for _ in 0..big_d {
+        if cur.len() <= m {
+            return Vec::new();
+        }
+        cur = (m..cur.len()).map(|i| cur[i] - cur[i - m]).collect();
+    }
     for _ in 0..d {
+        if cur.is_empty() {
+            return cur;
+        }
         cur = (1..cur.len()).map(|i| cur[i] - cur[i - 1]).collect();
     }
     cur
 }
 
-/// Integrate `w_centered` back to the original scale, given the first
-/// `d` observations of the original series as the seed.
-fn integrate(w: &[f64], seed: &[f64]) -> Vec<f64> {
-    let d = seed.len();
-    if d == 0 {
-        return w.to_vec();
+/// Polynomial multiplication of two coefficient vectors.
+fn poly_mul(a: &[f64], b: &[f64]) -> Vec<f64> {
+    if a.is_empty() || b.is_empty() {
+        return Vec::new();
     }
-    // Build the full original-scale series by repeatedly cumulative-summing.
-    // After d differences, integrating once each time using the corresponding
-    // seed value reconstructs the original.
-    let mut cur: Vec<f64> = w.to_vec();
-    for k in 0..d {
-        // Seed for the k-th integration: the (d-1-k)-th element of `seed`
-        // — we integrate the most-differenced result first.
-        let seed_val = seed[d - 1 - k];
-        let mut next = Vec::with_capacity(cur.len() + 1);
-        next.push(seed_val);
-        let mut running = seed_val;
-        for v in &cur {
-            running += v;
-            next.push(running);
+    let mut out = vec![0.0f64; a.len() + b.len() - 1];
+    for (i, &av) in a.iter().enumerate() {
+        for (j, &bv) in b.iter().enumerate() {
+            out[i + j] += av * bv;
         }
-        cur = next;
     }
-    cur
+    out
 }
 
-/// Integrate forecasts on the differenced scale back to the original
-/// scale, using `last_obs` (oldest → newest, length `d`) as the seed.
-fn integrate_from_last(w_forecasts: &[f64], last_obs: &[f64], d: usize) -> Vec<f64> {
-    if d == 0 {
+/// Expand `(1 − B)^d · (1 − B^m)^D` into its coefficient vector
+/// (constant term first; total length `1 + d + D·m`).
+fn full_diff_polynomial(d: usize, big_d: usize, m: usize) -> Vec<f64> {
+    let mut poly = vec![1.0f64];
+    let one_minus_b = vec![1.0f64, -1.0];
+    for _ in 0..d {
+        poly = poly_mul(&poly, &one_minus_b);
+    }
+    if big_d > 0 && m > 0 {
+        let mut one_minus_bm = vec![0.0f64; m + 1];
+        one_minus_bm[0] = 1.0;
+        one_minus_bm[m] = -1.0;
+        for _ in 0..big_d {
+            poly = poly_mul(&poly, &one_minus_bm);
+        }
+    }
+    poly
+}
+
+/// In-sample integration: reconstruct y from its full differencing.
+/// Given the original `y` (length n) and the centered + differenced
+/// fitted values `w` (length n - d - D·m), return a fitted-on-y-scale
+/// sequence (length n). The first `d + D·m` entries are populated from
+/// `y` itself (we have no model for them).
+fn full_integrate_in_sample(
+    y: &[f64],
+    w: &[f64],
+    d: usize,
+    big_d: usize,
+    m: usize,
+) -> Vec<f64> {
+    let total_diff = d + big_d * m;
+    if total_diff == 0 {
+        return w.to_vec();
+    }
+    let n = y.len();
+    let p_coeffs = full_diff_polynomial(d, big_d, m);
+    let mut out = y[..total_diff].to_vec();
+    for i in 0..w.len() {
+        // y_t = w_t − Σ_{k=1..total_diff} p_k · y_{t-k}.
+        let mut y_t = w[i];
+        for k in 1..=total_diff {
+            y_t -= p_coeffs[k] * out[out.len() - k];
+        }
+        out.push(y_t);
+    }
+    debug_assert_eq!(out.len(), n);
+    out
+}
+
+/// Forecast-scale integration: take the last `d + D·m` raw observations
+/// of `y` as the tail and append the differenced-scale forecasts,
+/// inverting the full differencing operator.
+fn full_integrate_from_tail(
+    w_forecasts: &[f64],
+    y_tail: &[f64],
+    d: usize,
+    big_d: usize,
+    m: usize,
+) -> Vec<f64> {
+    let total_diff = d + big_d * m;
+    if total_diff == 0 {
         return w_forecasts.to_vec();
     }
-    let mut cur: Vec<f64> = w_forecasts.to_vec();
-    // We need to integrate d times. At each level k (1..=d), the seed is the
-    // d-th-difference value just before the forecast starts.
-    let mut levels: Vec<Vec<f64>> = Vec::with_capacity(d + 1);
-    levels.push(last_obs.to_vec());
-    let mut tmp = last_obs.to_vec();
-    for _ in 0..d {
-        tmp = (1..tmp.len()).map(|i| tmp[i] - tmp[i - 1]).collect();
-        levels.push(tmp.clone());
-    }
-    // levels[k] is the k-th difference of last_obs.
-    // Integrate d times: at step k, prepend last value of levels[d-k] and cumsum.
-    for k in 0..d {
-        let last_val = *levels[d - 1 - k].last().unwrap_or(&0.0);
-        let mut next = Vec::with_capacity(cur.len());
-        let mut running = last_val;
-        for v in &cur {
-            running += v;
-            next.push(running);
+    debug_assert_eq!(y_tail.len(), total_diff);
+    let p_coeffs = full_diff_polynomial(d, big_d, m);
+    let mut buf = y_tail.to_vec();
+    for &w_t in w_forecasts {
+        let mut y_t = w_t;
+        for k in 1..=total_diff {
+            y_t -= p_coeffs[k] * buf[buf.len() - k];
         }
-        cur = next;
+        buf.push(y_t);
+    }
+    buf[total_diff..].to_vec()
+}
+
+/// Combine non-seasonal AR polynomial `phi` and seasonal AR polynomial
+/// `seasonal_phi` (coefficients of `B^m`, `B^(2m)`, …, `B^(P·m)`) into
+/// one polynomial of length `p + P·m`. Sign convention follows the
+/// non-seasonal `phi` (i.e., the combined polynomial is `1 − Σ c_k B^k`).
+fn convolve_ar(phi: &[f64], seasonal_phi: &[f64], m: usize) -> Vec<f64> {
+    if seasonal_phi.is_empty() {
+        return phi.to_vec();
+    }
+    let p = phi.len();
+    let big_p = seasonal_phi.len();
+    let total = p + big_p * m;
+    let mut out = vec![0.0f64; total];
+    for i in 1..=p {
+        out[i - 1] += phi[i - 1];
+    }
+    for j in 1..=big_p {
+        out[j * m - 1] += seasonal_phi[j - 1];
+    }
+    for i in 1..=p {
+        for j in 1..=big_p {
+            let k = i + j * m;
+            out[k - 1] -= phi[i - 1] * seasonal_phi[j - 1];
+        }
+    }
+    out
+}
+
+/// Combine non-seasonal MA polynomial `theta` and seasonal MA polynomial
+/// `seasonal_theta` (coefficients of `B^m`, `B^(2m)`, …) into one
+/// polynomial of length `q + Q·m`. MA sign convention: combined
+/// polynomial is `1 + Σ c_k B^k`.
+fn convolve_ma(theta: &[f64], seasonal_theta: &[f64], m: usize) -> Vec<f64> {
+    if seasonal_theta.is_empty() {
+        return theta.to_vec();
+    }
+    let q = theta.len();
+    let big_q = seasonal_theta.len();
+    let total = q + big_q * m;
+    let mut out = vec![0.0f64; total];
+    for i in 1..=q {
+        out[i - 1] += theta[i - 1];
+    }
+    for j in 1..=big_q {
+        out[j * m - 1] += seasonal_theta[j - 1];
+    }
+    for i in 1..=q {
+        for j in 1..=big_q {
+            let k = i + j * m;
+            out[k - 1] += theta[i - 1] * seasonal_theta[j - 1];
+        }
+    }
+    out
+}
+
+/// Integrate ψ-weights through both differencing operators. For
+/// non-seasonal `d` we cumulatively sum; for seasonal `D` we cumulatively
+/// sum with stride `m`.
+fn integrate_psi_seasonal(psi: &[f64], d: usize, big_d: usize, m: usize) -> Vec<f64> {
+    let mut cur = psi.to_vec();
+    for _ in 0..d {
+        let mut running = 0.0f64;
+        for v in cur.iter_mut() {
+            running += *v;
+            *v = running;
+        }
+    }
+    if big_d > 0 && m > 0 {
+        for _ in 0..big_d {
+            // Stride-m running sum: cur[i] += cur[i - m].
+            for i in m..cur.len() {
+                cur[i] += cur[i - m];
+            }
+        }
     }
     cur
 }
@@ -666,20 +841,40 @@ fn css_sse(w: &[f64], phi: &[f64], theta: &[f64]) -> f64 {
     eps.iter().skip(m).map(|e| e * e).sum()
 }
 
-/// Unpack the unconstrained vector `x` into (φ, θ) via the PACF
-/// transformation.
-fn unpack(x: &[f64], p: usize, q: usize) -> (Vec<f64>, Vec<f64>) {
-    let phi_pacf: Vec<f64> = x[..p]
+/// Unpack the unconstrained vector `x` into the four polynomial blocks
+/// via PACF transformation. Layout: `[φ_real…, Φ_real…, θ_real…, Θ_real…]`.
+fn unpack_full(
+    x: &[f64],
+    p: usize,
+    big_p: usize,
+    q: usize,
+    big_q: usize,
+) -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
+    let mut idx = 0;
+    let phi_pacf: Vec<f64> = x[idx..idx + p]
         .iter()
         .map(|&v| transform::real_to_pacf(v))
         .collect();
-    let theta_pacf: Vec<f64> = x[p..p + q]
+    idx += p;
+    let phi_s_pacf: Vec<f64> = x[idx..idx + big_p]
+        .iter()
+        .map(|&v| transform::real_to_pacf(v))
+        .collect();
+    idx += big_p;
+    let theta_pacf: Vec<f64> = x[idx..idx + q]
+        .iter()
+        .map(|&v| transform::real_to_pacf(v))
+        .collect();
+    idx += q;
+    let theta_s_pacf: Vec<f64> = x[idx..idx + big_q]
         .iter()
         .map(|&v| transform::real_to_pacf(v))
         .collect();
     let phi = transform::pacf_to_ar_poly(&phi_pacf);
+    let phi_s = transform::pacf_to_ar_poly(&phi_s_pacf);
     let theta = transform::pacf_to_ma_poly(&theta_pacf);
-    (phi, theta)
+    let theta_s = transform::pacf_to_ma_poly(&theta_s_pacf);
+    (phi, phi_s, theta, theta_s)
 }
 
 // ----------------------------------------------------------------------

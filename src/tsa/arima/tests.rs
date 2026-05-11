@@ -59,8 +59,8 @@ fn simulate_arma(n: usize, phi: &[f64], theta: &[f64], sigma: f64, seed: u64) ->
 #[test]
 fn diff_then_integrate_roundtrips_d1() {
     let y: Vec<f64> = (1..=20).map(|i| (i as f64).powi(2) + 0.5 * i as f64).collect();
-    let w = difference(&y, 1);
-    let back = integrate(&w, &y[..1]);
+    let w = super::full_difference(&y, 1, 0, 0);
+    let back = super::full_integrate_in_sample(&y, &w, 1, 0, 0);
     assert_eq!(back.len(), y.len());
     for (a, b) in y.iter().zip(back.iter()) {
         assert!((a - b).abs() < 1e-10, "y={a}, back={b}");
@@ -70,8 +70,32 @@ fn diff_then_integrate_roundtrips_d1() {
 #[test]
 fn diff_then_integrate_roundtrips_d2() {
     let y: Vec<f64> = (0..30).map(|i| (i as f64).sin() * 3.0 + 0.1 * i as f64).collect();
-    let w = difference(&y, 2);
-    let back = integrate(&w, &y[..2]);
+    let w = super::full_difference(&y, 2, 0, 0);
+    let back = super::full_integrate_in_sample(&y, &w, 2, 0, 0);
+    assert_eq!(back.len(), y.len());
+    for (a, b) in y.iter().zip(back.iter()) {
+        assert!((a - b).abs() < 1e-9, "y={a}, back={b}");
+    }
+}
+
+#[test]
+fn seasonal_diff_then_integrate_roundtrips() {
+    // (1 - B^4)^1 on a series of length 24.
+    let y: Vec<f64> = (0..24).map(|i| (i as f64 * 0.3).cos() + 0.05 * i as f64).collect();
+    let w = super::full_difference(&y, 0, 1, 4);
+    let back = super::full_integrate_in_sample(&y, &w, 0, 1, 4);
+    assert_eq!(back.len(), y.len());
+    for (a, b) in y.iter().zip(back.iter()) {
+        assert!((a - b).abs() < 1e-9, "y={a}, back={b}");
+    }
+}
+
+#[test]
+fn combined_diff_then_integrate_roundtrips() {
+    // (1 - B) (1 - B^4) on length 30.
+    let y: Vec<f64> = (0..30).map(|i| (i as f64 * 0.4).sin() + 0.1 * i as f64).collect();
+    let w = super::full_difference(&y, 1, 1, 4);
+    let back = super::full_integrate_in_sample(&y, &w, 1, 1, 4);
     assert_eq!(back.len(), y.len());
     for (a, b) in y.iter().zip(back.iter()) {
         assert!((a - b).abs() < 1e-9, "y={a}, back={b}");
@@ -81,7 +105,31 @@ fn diff_then_integrate_roundtrips_d2() {
 #[test]
 fn diff_d0_is_identity() {
     let y = vec![1.0, 2.0, 3.0, 4.0];
-    assert_eq!(difference(&y, 0), y);
+    assert_eq!(super::full_difference(&y, 0, 0, 0), y);
+}
+
+#[test]
+fn convolve_ar_simple() {
+    // (1 - 0.5 B)(1 - 0.3 B^4) = 1 - 0.5 B - 0.3 B^4 + 0.15 B^5.
+    let combined = super::convolve_ar(&[0.5], &[0.3], 4);
+    // out[k-1] = coefficient of B^k in (1 - Σ c_k B^k)
+    // → out = [0.5, 0, 0, 0.3, -0.15]
+    let expected = [0.5, 0.0, 0.0, 0.3, -0.15];
+    assert_eq!(combined.len(), 5);
+    for (a, e) in combined.iter().zip(expected.iter()) {
+        assert!((a - e).abs() < 1e-12, "got {a}, expected {e}");
+    }
+}
+
+#[test]
+fn convolve_ma_simple() {
+    // (1 + 0.4 B)(1 + 0.2 B^4) = 1 + 0.4 B + 0.2 B^4 + 0.08 B^5.
+    let combined = super::convolve_ma(&[0.4], &[0.2], 4);
+    let expected = [0.4, 0.0, 0.0, 0.2, 0.08];
+    assert_eq!(combined.len(), 5);
+    for (a, e) in combined.iter().zip(expected.iter()) {
+        assert!((a - e).abs() < 1e-12, "got {a}, expected {e}");
+    }
 }
 
 // ----------------------------------------------------------------------
@@ -275,17 +323,28 @@ fn psi_weights_ma1_truncate_after_q() {
 #[test]
 fn integrate_psi_d1_is_cumsum() {
     let psi = vec![1.0, 0.5, 0.25];
-    let starred = super::integrate_psi(&psi, 1);
+    let starred = super::integrate_psi_seasonal(&psi, 1, 0, 0);
     assert_eq!(starred, vec![1.0, 1.5, 1.75]);
 }
 
 #[test]
 fn integrate_psi_d2() {
     let psi = vec![1.0, 0.5, 0.25];
-    // After d=1: [1.0, 1.5, 1.75]
-    // After d=2: [1.0, 2.5, 4.25]
-    let starred = super::integrate_psi(&psi, 2);
+    let starred = super::integrate_psi_seasonal(&psi, 2, 0, 0);
     assert_eq!(starred, vec![1.0, 2.5, 4.25]);
+}
+
+#[test]
+fn integrate_psi_seasonal_stride_works() {
+    let psi = vec![1.0, 0.2, 0.04, 0.008];
+    // D=1, m=2 → cur[i] += cur[i - 2]:
+    // i=2: 0.04 += 1.0 = 1.04
+    // i=3: 0.008 += 0.2 = 0.208
+    let starred = super::integrate_psi_seasonal(&psi, 0, 1, 2);
+    assert!((starred[0] - 1.0).abs() < 1e-12);
+    assert!((starred[1] - 0.2).abs() < 1e-12);
+    assert!((starred[2] - 1.04).abs() < 1e-12);
+    assert!((starred[3] - 0.208).abs() < 1e-12);
 }
 
 #[test]
@@ -453,6 +512,126 @@ fn arimax_forecast_intervals_have_correct_shape() {
         assert!(r.upper[h] >= r.mean[h]);
     }
 }
+
+// ----------------------------------------------------------------------
+// Seasonal ARIMA (SARIMA)
+// ----------------------------------------------------------------------
+
+fn simulate_sarima(
+    n: usize,
+    phi: &[f64],
+    theta: &[f64],
+    seasonal_phi: &[f64],
+    seasonal_theta: &[f64],
+    m: usize,
+    sigma: f64,
+    seed: u64,
+) -> Vec<f64> {
+    // Combine to total polynomials for the simulation recursion.
+    let total_ar = super::convolve_ar(phi, seasonal_phi, m);
+    let total_ma = super::convolve_ma(theta, seasonal_theta, m);
+    let ar_order = total_ar.len();
+    let ma_order = total_ma.len();
+    let burn = 200 + ar_order.max(ma_order);
+    let total = n + burn;
+    let mut rng = Rng::new(seed);
+    let mut eps = vec![0.0f64; total];
+    let mut y = vec![0.0f64; total];
+    for t in 0..total {
+        eps[t] = sigma * rng.normal();
+        let mut yt = eps[t];
+        for i in 0..ar_order.min(t) {
+            yt += total_ar[i] * y[t - 1 - i];
+        }
+        for i in 0..ma_order.min(t) {
+            yt += total_ma[i] * eps[t - 1 - i];
+        }
+        y[t] = yt;
+    }
+    y[burn..].to_vec()
+}
+
+#[test]
+fn sarima_recovers_seasonal_ar() {
+    // SARIMA(0, 0, 0)(1, 0, 0)[4] with Φ_1 = 0.5.
+    let y = simulate_sarima(2_000, &[], &[], &[0.5], &[], 4, 1.0, 0xD1);
+    let opts = ArimaOpts::seasonal(0, 0, 0, 1, 0, 0, 4);
+    let fit = arima(&y, opts).unwrap();
+    assert_eq!(fit.seasonal_phi.len(), 1);
+    assert!(
+        (fit.seasonal_phi[0] - 0.5).abs() < 0.10,
+        "Φ = {}",
+        fit.seasonal_phi[0]
+    );
+}
+
+#[test]
+fn sarima_recovers_seasonal_ma() {
+    // SARIMA(0, 0, 0)(0, 0, 1)[4] with Θ_1 = 0.4.
+    let y = simulate_sarima(2_000, &[], &[], &[], &[0.4], 4, 1.0, 0xD2);
+    let opts = ArimaOpts::seasonal(0, 0, 0, 0, 0, 1, 4);
+    let fit = arima(&y, opts).unwrap();
+    assert_eq!(fit.seasonal_theta.len(), 1);
+    assert!(
+        (fit.seasonal_theta[0] - 0.4).abs() < 0.10,
+        "Θ = {}",
+        fit.seasonal_theta[0]
+    );
+}
+
+#[test]
+fn sarima_recovers_non_seasonal_and_seasonal_ar() {
+    // SARIMA(1, 0, 0)(1, 0, 0)[4]: φ=0.5, Φ=0.3.
+    let y = simulate_sarima(3_000, &[0.5], &[], &[0.3], &[], 4, 1.0, 0xD3);
+    let opts = ArimaOpts::seasonal(1, 0, 0, 1, 0, 0, 4);
+    let fit = arima(&y, opts).unwrap();
+    assert!((fit.phi[0] - 0.5).abs() < 0.10, "φ = {}", fit.phi[0]);
+    assert!(
+        (fit.seasonal_phi[0] - 0.3).abs() < 0.10,
+        "Φ = {}",
+        fit.seasonal_phi[0]
+    );
+}
+
+#[test]
+fn sarima_seasonal_diff_only() {
+    // SARIMA(0, 0, 0)(0, 1, 0)[12] — pure seasonal random walk.
+    let mut rng = Rng::new(0xD4);
+    let m = 12usize;
+    let n = 240usize;
+    let mut y = vec![0.0f64; n];
+    for i in 0..m {
+        y[i] = rng.normal() * 10.0;
+    }
+    for t in m..n {
+        y[t] = y[t - m] + rng.normal();
+    }
+    let opts = ArimaOpts::seasonal(0, 0, 0, 0, 1, 0, m as u32);
+    let fit = arima(&y, opts).unwrap();
+    assert!(fit.sigma2.is_finite() && fit.sigma2 > 0.0);
+    let f = fit.forecast(24);
+    assert_eq!(f.len(), 24);
+    for v in &f {
+        assert!(v.is_finite());
+    }
+}
+
+#[test]
+fn sarima_forecast_intervals() {
+    let y = simulate_sarima(500, &[0.3], &[], &[0.2], &[], 4, 1.0, 0xD5);
+    let opts = ArimaOpts::seasonal(1, 0, 0, 1, 0, 0, 4);
+    let fit = arima(&y, opts).unwrap();
+    let r = fit.forecast_with_intervals(12, 0.05);
+    assert_eq!(r.mean.len(), 12);
+    for h in 1..12 {
+        assert!(
+            r.variance[h] >= r.variance[h - 1] - 1e-12,
+            "variance not monotone at h={h}",
+        );
+    }
+}
+
+// ----------------------------------------------------------------------
 
 #[test]
 fn aic_bic_finite() {
