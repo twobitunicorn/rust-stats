@@ -45,6 +45,8 @@ pub enum StlError {
     InvalidTrendWindow(u32),
     #[error("inner_iters must be >= 1; got 0")]
     InvalidInnerIters,
+    #[error("{which}_jump must be >= 1; got 0")]
+    InvalidJump { which: &'static str },
     #[error("series too short: needs >= 2*period samples, got {n} < {min}")]
     SeriesTooShort { n: usize, min: usize },
     #[error("multiplicative mode requires strictly positive values; got {min}")]

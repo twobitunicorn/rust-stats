@@ -44,6 +44,15 @@ pub struct StlOpts {
     /// Number of inner-loop iterations. Cleveland recommends 2.
     pub inner_iters: u32,
     pub mode: DecomposeMode,
+    /// Cleveland 1990 "jump" parameter for the cycle-subseries smoother:
+    /// fit LOESS at every `seasonal_jump`-th point in each subseries and
+    /// linearly interpolate between them. Must be `>= 1`; `1` is exact.
+    /// Cleveland recommends `round(period / 10)` for typical workloads.
+    pub seasonal_jump: u32,
+    /// Jump parameter for the trend LOESS. Must be `>= 1`; `1` is exact.
+    pub trend_jump: u32,
+    /// Jump parameter for the low-pass LOESS. Must be `>= 1`; `1` is exact.
+    pub low_pass_jump: u32,
 }
 
 impl StlOpts {
@@ -54,6 +63,9 @@ impl StlOpts {
             trend_window: None,
             inner_iters: 2,
             mode: DecomposeMode::Additive,
+            seasonal_jump: 1,
+            trend_jump: 1,
+            low_pass_jump: 1,
         }
     }
 }

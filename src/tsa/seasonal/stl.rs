@@ -12,7 +12,7 @@
 //! Multiplicative mode: log-transform → additive STL → exp components.
 
 use crate::error::StlError;
-use crate::smoothing::loess::{local_poly_fit_at_xf64, loess_compute};
+use crate::smoothing::loess::{local_poly_fit_at_xf64, loess_compute_with_jump};
 use crate::tsa::seasonal::{DecomposeMode, Decomposition, StlOpts};
 
 /// Cleveland 1990 STL.
@@ -53,6 +53,19 @@ pub fn stl(y: &[f64], opts: StlOpts) -> Result<Decomposition, StlError> {
         return Err(StlError::InvalidInnerIters);
     }
 
+    if opts.seasonal_jump == 0 {
+        return Err(StlError::InvalidJump { which: "seasonal" });
+    }
+    if opts.trend_jump == 0 {
+        return Err(StlError::InvalidJump { which: "trend" });
+    }
+    if opts.low_pass_jump == 0 {
+        return Err(StlError::InvalidJump { which: "low_pass" });
+    }
+    let seasonal_jump = opts.seasonal_jump as usize;
+    let trend_jump    = opts.trend_jump    as usize;
+    let low_pass_jump = opts.low_pass_jump as usize;
+
     if y.is_empty() {
         return Err(StlError::SeriesTooShort {
             n: 0,
@@ -87,7 +100,10 @@ pub fn stl(y: &[f64], opts: StlOpts) -> Result<Decomposition, StlError> {
         raw
     };
 
-    let (trend, seasonal) = stl_inner_loop(&work, period, n_s, n_l, n_t, n_i);
+    let (trend, seasonal) = stl_inner_loop(
+        &work, period, n_s, n_l, n_t, n_i,
+        seasonal_jump, trend_jump, low_pass_jump,
+    );
 
     let residual: Vec<f64> = (0..n)
         .map(|i| work[i] - trend[i] - seasonal[i])
@@ -140,8 +156,17 @@ fn valid_ma(y: &[f64], window: usize) -> Vec<f64> {
     out
 }
 
-/// Cycle-subseries smoothing — Step 2 of STL.
-fn cycle_subseries_smooth(d: &[f64], period: usize, span: usize, degree: usize) -> Vec<f64> {
+/// Cycle-subseries smoothing — Step 2 of STL. The within-subseries LOESS
+/// fit can be approximated by fitting at every `jump`-th point and
+/// linearly interpolating between fit points; `jump = 1` is exact. The
+/// two boundary extrapolation points (one each end) are always exact.
+fn cycle_subseries_smooth(
+    d: &[f64],
+    period: usize,
+    span: usize,
+    degree: usize,
+    jump: usize,
+) -> Vec<f64> {
     let n = d.len();
     let mut c = vec![0.0; n + 2 * period];
 
@@ -155,9 +180,37 @@ fn cycle_subseries_smooth(d: &[f64], period: usize, span: usize, degree: usize) 
 
         c[phase] = local_poly_fit_at_xf64(&subs, -1.0, k, degree);
 
-        for j in 0..sub_n {
-            let orig = phase + j * period;
-            c[period + orig] = local_poly_fit_at_xf64(&subs, j as f64, k, degree);
+        if jump <= 1 || sub_n <= 2 {
+            for j in 0..sub_n {
+                let orig = phase + j * period;
+                c[period + orig] = local_poly_fit_at_xf64(&subs, j as f64, k, degree);
+            }
+        } else {
+            // Fit at j ∈ {0, jump, 2*jump, ..., sub_n-1} and interpolate.
+            let mut fit_at: Vec<usize> = (0..sub_n).step_by(jump).collect();
+            if *fit_at.last().unwrap() != sub_n - 1 {
+                fit_at.push(sub_n - 1);
+            }
+            let fit_vals: Vec<f64> = fit_at
+                .iter()
+                .map(|&j| local_poly_fit_at_xf64(&subs, j as f64, k, degree))
+                .collect();
+            for w in 0..(fit_at.len() - 1) {
+                let j0 = fit_at[w];
+                let j1 = fit_at[w + 1];
+                let y0 = fit_vals[w];
+                let y1 = fit_vals[w + 1];
+                let span_j = (j1 - j0) as f64;
+                c[period + (phase + j0 * period)] = y0;
+                if j1 > j0 + 1 {
+                    for j in (j0 + 1)..j1 {
+                        let alpha = (j - j0) as f64 / span_j;
+                        c[period + (phase + j * period)] = y0 + alpha * (y1 - y0);
+                    }
+                }
+            }
+            let last_j = *fit_at.last().unwrap();
+            c[period + (phase + last_j * period)] = *fit_vals.last().unwrap();
         }
 
         let after = phase + sub_n * period;
@@ -167,14 +220,21 @@ fn cycle_subseries_smooth(d: &[f64], period: usize, span: usize, degree: usize) 
 }
 
 /// Low-pass filter — Step 3 of STL.
-fn low_pass_filter(c: &[f64], period: usize, span: usize, degree: usize) -> Vec<f64> {
+fn low_pass_filter(
+    c: &[f64],
+    period: usize,
+    span: usize,
+    degree: usize,
+    jump: usize,
+) -> Vec<f64> {
     let ma1 = valid_ma(c, period);
     let ma2 = valid_ma(&ma1, period);
     let ma3 = valid_ma(&ma2, 3);
-    loess_compute(&ma3, span, degree)
+    loess_compute_with_jump(&ma3, span, degree, jump)
 }
 
 /// One inner loop pass repeated `n_i` times. Returns `(trend, seasonal)`.
+#[allow(clippy::too_many_arguments)]
 fn stl_inner_loop(
     y: &[f64],
     period: usize,
@@ -182,6 +242,9 @@ fn stl_inner_loop(
     n_l: usize,
     n_t: usize,
     n_i: usize,
+    seasonal_jump: usize,
+    trend_jump:    usize,
+    low_pass_jump: usize,
 ) -> (Vec<f64>, Vec<f64>) {
     let n = y.len();
     let mut trend = vec![0.0f64; n];
@@ -189,11 +252,11 @@ fn stl_inner_loop(
 
     for _ in 0..n_i {
         let detrended: Vec<f64> = (0..n).map(|i| y[i] - trend[i]).collect();
-        let c = cycle_subseries_smooth(&detrended, period, n_s, 1);
-        let l = low_pass_filter(&c, period, n_l, 1);
+        let c = cycle_subseries_smooth(&detrended, period, n_s, 1, seasonal_jump);
+        let l = low_pass_filter(&c, period, n_l, 1, low_pass_jump);
         seasonal = (0..n).map(|i| c[period + i] - l[i]).collect();
         let deseasonalized: Vec<f64> = (0..n).map(|i| y[i] - seasonal[i]).collect();
-        trend = loess_compute(&deseasonalized, n_t, 1);
+        trend = loess_compute_with_jump(&deseasonalized, n_t, 1, trend_jump);
     }
     (trend, seasonal)
 }

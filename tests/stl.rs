@@ -162,3 +162,94 @@ fn rejects_non_finite() {
         Err(StlError::NonFinite)
     ));
 }
+
+// ── Jump-parameter tests ─────────────────────────────────────────────────
+
+fn airpassengers_like(n: usize, period: usize) -> Vec<f64> {
+    let mut state = 1u64;
+    (0..n)
+        .map(|i| {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let noise = (state as f64 / u64::MAX as f64) - 0.5;
+            let phase = 2.0 * std::f64::consts::PI * (i % period) as f64 / period as f64;
+            100.0 + 0.5 * i as f64 + 30.0 * phase.sin() + 5.0 * noise
+        })
+        .collect()
+}
+
+#[test]
+fn jump_one_matches_default() {
+    let y = airpassengers_like(144, 12);
+    let default = stl(&y, StlOpts::new(12)).unwrap();
+    let explicit_one = stl(
+        &y,
+        StlOpts {
+            seasonal_jump: 1,
+            trend_jump:    1,
+            low_pass_jump: 1,
+            ..StlOpts::new(12)
+        },
+    )
+    .unwrap();
+    for i in 0..y.len() {
+        assert_relative_eq!(default.trend[i],    explicit_one.trend[i],    epsilon = 1e-12);
+        assert_relative_eq!(default.seasonal[i], explicit_one.seasonal[i], epsilon = 1e-12);
+        assert_relative_eq!(default.residual[i], explicit_one.residual[i], epsilon = 1e-12);
+    }
+}
+
+#[test]
+fn jump_two_close_to_exact_and_reconstructs() {
+    let y = airpassengers_like(144, 12);
+    let exact = stl(&y, StlOpts::new(12)).unwrap();
+    let jumped = stl(
+        &y,
+        StlOpts {
+            seasonal_jump: 2,
+            trend_jump:    2,
+            low_pass_jump: 2,
+            ..StlOpts::new(12)
+        },
+    )
+    .unwrap();
+    // Reconstruction identity still holds (T + S + R = y) regardless of jumps.
+    for i in 0..y.len() {
+        assert_relative_eq!(
+            jumped.trend[i] + jumped.seasonal[i] + jumped.residual[i],
+            y[i],
+            epsilon = 1e-10
+        );
+    }
+    // Jumped components should be close to exact — the linear interpolation
+    // introduces error proportional to the curvature of the LOESS surface;
+    // on a smooth seasonal pattern with period=12 the drift is small.
+    for i in 0..y.len() {
+        assert!(
+            (jumped.trend[i] - exact.trend[i]).abs() < 3.0,
+            "trend drift at i={i}: {} vs {}", jumped.trend[i], exact.trend[i]
+        );
+        assert!(
+            (jumped.seasonal[i] - exact.seasonal[i]).abs() < 3.0,
+            "seasonal drift at i={i}: {} vs {}", jumped.seasonal[i], exact.seasonal[i]
+        );
+    }
+}
+
+#[test]
+fn zero_jumps_error() {
+    let y = airpassengers_like(48, 4);
+    assert!(matches!(
+        stl(&y, StlOpts { seasonal_jump: 0, ..StlOpts::new(4) }),
+        Err(StlError::InvalidJump { which: "seasonal" })
+    ));
+    assert!(matches!(
+        stl(&y, StlOpts { trend_jump: 0, ..StlOpts::new(4) }),
+        Err(StlError::InvalidJump { which: "trend" })
+    ));
+    assert!(matches!(
+        stl(&y, StlOpts { low_pass_jump: 0, ..StlOpts::new(4) }),
+        Err(StlError::InvalidJump { which: "low_pass" })
+    ));
+}

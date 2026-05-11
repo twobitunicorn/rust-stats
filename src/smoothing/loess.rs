@@ -248,19 +248,90 @@ pub(crate) fn local_poly_fit_at(y: &[f64], xq: usize, k: usize, degree: usize) -
 /// (which converts a fractional span first) and STL (which uses integer
 /// windows throughout). Parallelises via rayon when n >= 256.
 pub(crate) fn loess_compute(y: &[f64], window: usize, degree: usize) -> Vec<f64> {
+    loess_compute_with_jump(y, window, degree, 1)
+}
+
+/// LOESS with Cleveland 1990's "jump" approximation: fit LOESS at every
+/// `jump`-th index and linearly interpolate between fit points. `jump = 1`
+/// reproduces `loess_compute` exactly; larger jumps trade accuracy for
+/// speed proportionally. The first and last indices are always exact fit
+/// points, so the result is anchored at the endpoints.
+pub(crate) fn loess_compute_with_jump(
+    y: &[f64],
+    window: usize,
+    degree: usize,
+    jump: usize,
+) -> Vec<f64> {
     let n = y.len();
     if n == 0 {
         return Vec::new();
     }
     let k = window.max(degree + 2).min(n);
-    // Below n=256, rayon's thread-spawn overhead dominates the per-point fit
-    // cost; serial iteration wins.
-    if n >= 256 {
-        (0..n)
-            .into_par_iter()
-            .map(|i| local_poly_fit_at(y, i, k, degree))
+    let jump = jump.max(1);
+
+    // For jump=1 we fit at every point; small-n falls below the rayon
+    // crossover even for jump>1 because the fit-point count drops further.
+    if jump == 1 {
+        return if n >= 256 {
+            (0..n)
+                .into_par_iter()
+                .map(|i| local_poly_fit_at(y, i, k, degree))
+                .collect()
+        } else {
+            (0..n).map(|i| local_poly_fit_at(y, i, k, degree)).collect()
+        };
+    }
+
+    let fit_at = jump_indices(n, jump);
+    let fit_vals: Vec<f64> = if fit_at.len() >= 64 {
+        fit_at
+            .par_iter()
+            .map(|&i| local_poly_fit_at(y, i, k, degree))
             .collect()
     } else {
-        (0..n).map(|i| local_poly_fit_at(y, i, k, degree)).collect()
+        fit_at
+            .iter()
+            .map(|&i| local_poly_fit_at(y, i, k, degree))
+            .collect()
+    };
+
+    interpolate_between(&fit_at, &fit_vals, n)
+}
+
+/// Indices at which to fit LOESS when using a jump approximation:
+/// `[0, jump, 2*jump, ...]` plus `n-1` if not already included.
+fn jump_indices(n: usize, jump: usize) -> Vec<usize> {
+    let mut out = Vec::with_capacity(n / jump + 2);
+    let mut i = 0;
+    while i < n {
+        out.push(i);
+        i += jump;
     }
+    if *out.last().unwrap() != n - 1 {
+        out.push(n - 1);
+    }
+    out
+}
+
+/// Linear interpolation between fit-point values, anchored at the
+/// indices in `fit_at`. Output length is `n`.
+fn interpolate_between(fit_at: &[usize], fit_vals: &[f64], n: usize) -> Vec<f64> {
+    debug_assert_eq!(fit_at.len(), fit_vals.len());
+    let mut out = vec![0.0; n];
+    for window_idx in 0..(fit_at.len() - 1) {
+        let i0 = fit_at[window_idx];
+        let i1 = fit_at[window_idx + 1];
+        let y0 = fit_vals[window_idx];
+        let y1 = fit_vals[window_idx + 1];
+        let span = (i1 - i0) as f64;
+        out[i0] = y0;
+        if i1 > i0 + 1 {
+            for i in (i0 + 1)..i1 {
+                let alpha = (i - i0) as f64 / span;
+                out[i] = y0 + alpha * (y1 - y0);
+            }
+        }
+    }
+    out[*fit_at.last().unwrap()] = *fit_vals.last().unwrap();
+    out
 }
