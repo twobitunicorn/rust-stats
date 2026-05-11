@@ -47,3 +47,25 @@ pub enum SeasonalDecomposeError {
     #[error("input contains non-finite values")]
     NonFinite,
 }
+
+#[derive(Debug, Error, PartialEq)]
+pub enum BoxCoxError {
+    #[error("Box-Cox requires strictly positive values; got minimum {min}")]
+    NonPositive { min: f64 },
+}
+
+#[derive(Debug, Error, PartialEq)]
+pub enum HoltWintersError {
+    #[error("alpha must be in [0, 1]; got {0}")]
+    InvalidAlpha(f64),
+    #[error("beta must be in [0, 1]; got {0}")]
+    InvalidBeta(f64),
+    #[error("gamma must be in [0, 1]; got {0}")]
+    InvalidGamma(f64),
+    #[error("series too short: needs >= {min} samples, got {n}")]
+    SeriesTooShort { n: usize, min: usize },
+    #[error("multiplicative mode requires strictly positive values; got {min}")]
+    NonPositiveForMultiplicative { min: f64 },
+    #[error("input contains non-finite values")]
+    NonFinite,
+}

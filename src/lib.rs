@@ -6,6 +6,7 @@
 
 pub mod error;
 pub mod smoothing;
+pub mod transforms;
 pub mod tsa;
 
 #[cfg(feature = "arrow")]
@@ -14,9 +15,10 @@ pub mod arrow_compat;
 #[cfg(feature = "polars")]
 pub mod polars_compat;
 
-pub use error::{LoessError, SeasonalDecomposeError, StlError};
+pub use error::{BoxCoxError, HoltWintersError, LoessError, SeasonalDecomposeError, StlError};
 pub use smoothing::{loess, loess_at};
+pub use transforms::{box_cox, center, min_max_scale, z_score};
 pub use tsa::{
-    seasonal_decompose, stl, DecomposeMode, Decomposition, Missing, SeasonalDecomposeOpts,
-    SeasonalWindow, StlOpts,
+    holt_winters, seasonal_decompose, stl, DecomposeMode, Decomposition, HoltWintersOpts, Missing,
+    SeasonalDecomposeOpts, SeasonalWindow, StlOpts,
 };
