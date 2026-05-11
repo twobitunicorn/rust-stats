@@ -7,9 +7,15 @@
 //!   4. Seasonal                `S = C[period..period+n] − L`
 //!   5. Deseasonalize           `Y − S`
 //!   6. Trend LOESS             `T = LOESS(Y − S)`
-//! repeated `inner_iters` times. No outer robustness loop.
+//! repeated `inner_iters` times. The outer robustness loop runs the inner
+//! loop `outer_iters + 1` times in total, refitting per-point bisquare
+//! weights from residuals between passes (Cleveland 1990 §3.5).
 //!
-//! Multiplicative mode: log-transform → additive STL → exp components.
+//! Multiplicative mode runs additive STL on `log(y)` and exponentiates
+//! each component on output — see `DecomposeMode::Multiplicative` for
+//! the rationale and the unit semantics. `SeasonalWindow::Periodic`
+//! short-circuits the cycle-subseries LOESS to a per-phase weighted mean
+//! (R's `s.window = "periodic"`).
 
 use crate::error::StlError;
 use crate::smoothing::loess::{
@@ -22,12 +28,36 @@ use crate::tsa::seasonal::{
 
 /// Cleveland 1990 STL.
 ///
-/// Returns a `Decomposition` whose three columns reconstruct `y` exactly
-/// (additive: `y = T + S + R`; multiplicative: `y = T * S * R`).
-/// LOESS-based — no NaN edges.
+/// Returns a [`Decomposition`] whose three components reconstruct `y`
+/// exactly:
 ///
-/// All tunable parameters live on `StlOpts` — use `StlOpts::new(period)`
-/// for Cleveland defaults and override fields with struct-update syntax.
+/// ```text
+/// additive:        y[i] = trend[i] + seasonal[i] + residual[i]
+/// multiplicative:  y[i] = trend[i] * seasonal[i] * residual[i]
+/// ```
+///
+/// LOESS-based — trend/seasonal/residual are finite at every index
+/// (no NaN edges as classical `seasonal_decompose` produces). For
+/// multiplicative mode, *residual* and *seasonal* are dimensionless
+/// ratios centred around 1 — see [`DecomposeMode::Multiplicative`].
+///
+/// All tunable parameters live on [`StlOpts`] — use `StlOpts::new(period)`
+/// for Cleveland 1990 defaults and override fields with struct-update
+/// syntax:
+///
+/// ```ignore
+/// use rust_stats::{stl, StlOpts, SeasonalWindow, DecomposeMode, Missing};
+///
+/// // Robust STL with a stationary seasonal pattern, multiplicative
+/// // model, and NaN handling:
+/// let d = stl(&y, StlOpts {
+///     seasonal_window: SeasonalWindow::Periodic,
+///     outer_iters:     15,
+///     mode:            DecomposeMode::Multiplicative,
+///     missing:         Missing::Interpolate,
+///     ..StlOpts::new(12)
+/// })?;
+/// ```
 pub fn stl(y: &[f64], opts: StlOpts) -> Result<Decomposition, StlError> {
     if opts.period < 2 {
         return Err(StlError::InvalidPeriod(opts.period));

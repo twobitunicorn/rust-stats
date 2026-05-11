@@ -1,24 +1,52 @@
 //! Classical (moving-average) seasonal-trend decomposition.
 //!
 //! Trend: centered moving average of length `period`.
-//! Seasonal (additive):       per-phase mean of `y - trend`, centred to sum
-//!                            to zero across one period.
-//! Seasonal (multiplicative): per-phase mean of `y / trend`, normalised so
-//!                            the pattern's arithmetic mean across one
-//!                            period is one.
+//!
+//! Seasonal (additive):       per-phase mean of `y - trend`, centred to
+//!                            sum to zero across one period.
+//! Seasonal (multiplicative): per-phase mean of `y / trend`, normalised
+//!                            so the pattern's arithmetic mean across
+//!                            one period is one.
+//!
 //! Residual: `y - trend - seasonal` (additive) or `y / (trend * seasonal)`
 //! (multiplicative).
 //!
-//! Matches `statsmodels.tsa.seasonal.seasonal_decompose` for both modes.
+//! Unlike STL, multiplicative `seasonal_decompose` uses the **direct**
+//! algorithm (centered MA on `y`, then `y / trend`, then phase-mean
+//! normalisation) — no log transform. The seasonal pattern and residual
+//! are dimensionless ratios centred around 1.
 //!
-//! The first/last `period/2` positions of `trend` and `residual` are NaN
-//! (the centred moving-average edge band).
+//! Matches `statsmodels.tsa.seasonal.seasonal_decompose` for both modes
+//! to floating-point precision (~1e-12).
+//!
+//! The first/last `period/2` positions of `trend` and `residual` are
+//! `NaN` (the centred moving-average edge band). When the input was
+//! processed with `Missing::Interpolate`, `residual[i]` is also `NaN`
+//! at originally non-finite positions.
 
 use crate::error::SeasonalDecomposeError;
 use crate::tsa::seasonal::{
     interpolate_missing, DecomposeMode, Decomposition, Missing, SeasonalDecomposeOpts,
 };
 
+/// Classical centered-MA seasonal decomposition. Faster and simpler
+/// than the [`stl`](super::stl::stl) function but coarser: the seasonal pattern is exactly
+/// periodic by construction (a single per-phase mean repeated), and the
+/// trend has `NaN` edges at the first/last `period/2` positions where
+/// the centered window doesn't fit.
+///
+/// Matches `statsmodels.tsa.seasonal.seasonal_decompose` bitwise for
+/// both additive and multiplicative modes — see the module docs for the
+/// algorithmic difference vs STL on multiplicative.
+///
+/// ```ignore
+/// use rust_stats::{seasonal_decompose, SeasonalDecomposeOpts, DecomposeMode};
+///
+/// let d = seasonal_decompose(&y, SeasonalDecomposeOpts {
+///     mode: DecomposeMode::Multiplicative,
+///     ..SeasonalDecomposeOpts::new(12)
+/// })?;
+/// ```
 pub fn seasonal_decompose(
     y: &[f64],
     opts: SeasonalDecomposeOpts,

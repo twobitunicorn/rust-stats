@@ -10,12 +10,25 @@ pub use stl::stl;
 
 /// Output of a seasonal-trend decomposition. The components reconstruct
 /// the input where defined:
-///   additive:        `y[i] = trend[i] + seasonal[i] + residual[i]`
-///   multiplicative:  `y[i] = trend[i] * seasonal[i] * residual[i]`
+///
+/// ```text
+/// additive:        y[i] = trend[i] + seasonal[i] + residual[i]
+/// multiplicative:  y[i] = trend[i] * seasonal[i] * residual[i]
+/// ```
+///
+/// **Units note for multiplicative mode.** Trend is in the original
+/// units (and is the *geometric* trend of `y`). Seasonal and residual
+/// are **dimensionless ratios** centred around 1 — e.g. a seasonal value
+/// of `1.40` means "this phase is 40% above the trend" and a residual of
+/// `0.95` means "5% below the model's prediction". This matches R and
+/// statsmodels. See `DecomposeMode::Multiplicative` for the rationale
+/// and the implementation choice.
 ///
 /// STL produces finite values everywhere; classical `seasonal_decompose`
-/// has NaN at the first/last `period/2` positions where the centered
-/// moving average can't be computed.
+/// has `NaN` at the first/last `period/2` positions where the centered
+/// moving average can't be computed. When the input was processed with
+/// `Missing::Interpolate`, `residual[i]` is also `NaN` at positions
+/// where the input was originally non-finite.
 #[derive(Debug, Clone)]
 pub struct Decomposition {
     pub trend: Vec<f64>,
@@ -23,6 +36,40 @@ pub struct Decomposition {
     pub residual: Vec<f64>,
 }
 
+/// Decomposition model: how the trend, seasonal, and residual components
+/// combine to reconstruct the input.
+///
+/// `Additive` (`y = T + S + R`): seasonal amplitude is independent of
+/// the level. Use when the seasonal swing is the same size regardless
+/// of how high or low the trend is.
+///
+/// `Multiplicative` (`y = T · S · R`): seasonal amplitude scales with
+/// the level. Use when the seasonal pattern is *proportional* — early
+/// AirPassengers years have small seasonal wiggles, late years have
+/// large ones, but the *ratio* of December-to-baseline is roughly
+/// constant.
+///
+/// ## Implementation
+///
+/// For **STL**, multiplicative mode is implemented as `log → additive
+/// STL → exp`: the input is log-transformed, additive STL runs on the
+/// log series, and each output component is exponentiated. This is the
+/// canonical workflow in the statistics literature; R's `stl()` and
+/// statsmodels' `STL` both expect users to do this transformation
+/// themselves. rust-stats bakes it in. Consequences:
+///
+/// - Requires **strictly positive** `y`; zero or negative values return
+///   `NonPositiveForMultiplicative`.
+/// - The trend is the **geometric trend** of `y` (in original units).
+/// - The residual is a **dimensionless ratio** (≈ 1 means no anomaly).
+/// - All other options compose normally — robust outer loop, jumps,
+///   missing-data interpolation, and `Periodic` all run in log space and
+///   the exp comes out the other side.
+///
+/// For **classical `seasonal_decompose`**, multiplicative mode uses the
+/// direct algorithm (centered arithmetic MA, then `y / trend`, then
+/// per-phase means normalised so the pattern's arithmetic mean across
+/// one period is 1). No log transform. Matches statsmodels bitwise.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecomposeMode {
     Additive,
