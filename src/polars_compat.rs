@@ -15,7 +15,7 @@ use polars::prelude::*;
 use crate::error::{LoessError, SeasonalDecomposeError, StlError};
 use crate::smoothing::loess as core_loess;
 use crate::tsa::{
-    seasonal_decompose as core_sd, stl as core_stl, SeasonalDecomposeOpts, StlOpts,
+    seasonal_decompose as core_sd, stl as core_stl, Missing, SeasonalDecomposeOpts, StlOpts,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -34,27 +34,31 @@ pub enum PolarsCompatError {
     SeasonalDecompose(#[from] SeasonalDecomposeError),
 }
 
-/// Pull a `Series`' contiguous `f64` values into a `Vec<f64>` — copy
-/// path because Polars chunked arrays may not be contiguous in memory.
-/// Errors if the series isn't Float64 or contains any nulls.
-fn series_to_vec(s: &Series) -> Result<Vec<f64>, PolarsCompatError> {
+/// Pull a `Series`' values into a `Vec<f64>`. Errors if the series
+/// isn't Float64. Nulls are handled per `missing`: `Missing::Error`
+/// fails fast with `HasNulls`, `Missing::Interpolate` substitutes
+/// `f64::NAN` so the core's linear-interpolation path picks them up.
+fn series_to_vec(s: &Series, missing: Missing) -> Result<Vec<f64>, PolarsCompatError> {
     let ca = s
         .f64()
         .map_err(|_| PolarsCompatError::NotFloat64(s.name().to_string()))?;
-    if ca.null_count() > 0 {
-        return Err(PolarsCompatError::HasNulls {
+    if ca.null_count() == 0 {
+        return Ok(ca.into_no_null_iter().collect());
+    }
+    match missing {
+        Missing::Error => Err(PolarsCompatError::HasNulls {
             col: s.name().to_string(),
             nulls: ca.null_count(),
-        });
+        }),
+        Missing::Interpolate => Ok(ca.iter().map(|opt| opt.unwrap_or(f64::NAN)).collect()),
     }
-    // ChunkedArray::to_vec walks the (possibly multi-chunk) array once.
-    // For typical single-chunk Series this is essentially a memcpy.
-    Ok(ca.into_no_null_iter().collect())
 }
 
-/// LOESS on a Polars `Series`. Output keeps the input's name.
+/// LOESS on a Polars `Series`. Errors on any null in `s` — preprocess
+/// with `s.fill_null(...)` or `s.interpolate(...)` upstream if your
+/// data has gaps. Output keeps the input's name.
 pub fn loess(s: &Series, span: f64, degree: u8) -> Result<Series, PolarsCompatError> {
-    let v = series_to_vec(s)?;
+    let v = series_to_vec(s, Missing::Error)?;
     let out = core_loess(&v, span, degree)?;
     Ok(Series::new(s.name().clone(), out))
 }
@@ -71,21 +75,24 @@ fn decomp_to_df(d: crate::tsa::Decomposition) -> Result<DataFrame, PolarsCompatE
 }
 
 /// Cleveland 1990 STL on a Polars `Series`. Returns a `DataFrame` with
-/// `trend`, `seasonal`, `residual` columns of length `s.len()`.
+/// `trend`, `seasonal`, `residual` columns of length `s.len()`. Honours
+/// `opts.missing` — set to `Missing::Interpolate` to linearly fill
+/// Polars nulls before the decomposition (residual will be NaN at those
+/// positions on output).
 pub fn stl(s: &Series, opts: StlOpts) -> Result<DataFrame, PolarsCompatError> {
-    let v = series_to_vec(s)?;
+    let v = series_to_vec(s, opts.missing)?;
     Ok(decomp_to_df(core_stl(&v, opts)?)?)
 }
 
 /// Classical seasonal_decompose on a Polars `Series`. Same output shape
 /// as `stl`, but `trend` and `residual` have nulls (NaN) at the
 /// first/last `period/2` positions where the centred MA can't be
-/// computed.
+/// computed. Honours `opts.missing` the same way `stl` does.
 pub fn seasonal_decompose(
     s: &Series,
     opts: SeasonalDecomposeOpts,
 ) -> Result<DataFrame, PolarsCompatError> {
-    let v = series_to_vec(s)?;
+    let v = series_to_vec(s, opts.missing)?;
     Ok(decomp_to_df(core_sd(&v, opts)?)?)
 }
 
@@ -101,13 +108,15 @@ pub struct PolarsDecompositionBatch {
     pub residual: DataFrame,
 }
 
-/// Validate that every column is Float64 + null-free, returning the
-/// per-column data as `Vec<f64>` in input order. Each column is
-/// materialised once.
-fn validated_columns(df: &DataFrame) -> Result<Vec<Vec<f64>>, PolarsCompatError> {
+/// Validate that every column is Float64 and convert to `Vec<f64>`.
+/// Nulls handled per `missing` (see `series_to_vec`).
+fn validated_columns(
+    df: &DataFrame,
+    missing: Missing,
+) -> Result<Vec<Vec<f64>>, PolarsCompatError> {
     let mut out = Vec::with_capacity(df.width());
     for col in df.columns() {
-        out.push(series_to_vec(col.as_materialized_series())?);
+        out.push(series_to_vec(col.as_materialized_series(), missing)?);
     }
     Ok(out)
 }
@@ -129,7 +138,10 @@ fn rebuild_df(schema_src: &DataFrame, cols: Vec<Vec<f64>>) -> Result<DataFrame, 
 /// (so polars+arrow users get the SIMD kernel); otherwise falls back to
 /// rayon-over-columns scalar LOESS.
 pub fn loess_batch(df: &DataFrame, span: f64, degree: u8) -> Result<DataFrame, PolarsCompatError> {
-    let cols = validated_columns(df)?;
+    // LOESS has no `Missing` option in the core API; preprocess upstream
+    // with `df.fill_null(...)` / `Series::interpolate(...)` if any column
+    // contains nulls.
+    let cols = validated_columns(df, Missing::Error)?;
     let outs = run_loess_batch(&cols, span, degree)?;
     rebuild_df(df, outs)
 }
@@ -170,7 +182,7 @@ pub fn stl_batch(
     opts: StlOpts,
 ) -> Result<PolarsDecompositionBatch, PolarsCompatError> {
     use rayon::prelude::*;
-    let cols = validated_columns(df)?;
+    let cols = validated_columns(df, opts.missing)?;
     let parts: Result<Vec<crate::tsa::Decomposition>, StlError> =
         cols.par_iter().map(|c| core_stl(c, opts.clone())).collect();
     let parts = parts?;
@@ -197,7 +209,7 @@ pub fn seasonal_decompose_batch(
     opts: SeasonalDecomposeOpts,
 ) -> Result<PolarsDecompositionBatch, PolarsCompatError> {
     use rayon::prelude::*;
-    let cols = validated_columns(df)?;
+    let cols = validated_columns(df, opts.missing)?;
     let parts: Result<Vec<crate::tsa::Decomposition>, SeasonalDecomposeError> =
         cols.par_iter().map(|c| core_sd(c, opts.clone())).collect();
     let parts = parts?;

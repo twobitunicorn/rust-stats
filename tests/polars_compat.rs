@@ -8,7 +8,7 @@ use rust_stats::polars_compat::{
     self, loess, loess_batch, seasonal_decompose, seasonal_decompose_batch, stl, stl_batch,
     PolarsCompatError,
 };
-use rust_stats::{DecomposeMode, SeasonalDecomposeOpts, StlOpts};
+use rust_stats::{DecomposeMode, Missing, SeasonalDecomposeOpts, StlOpts};
 
 fn series_with_seasonality(n: usize, period: usize, seed: u64) -> Vec<f64> {
     let mut s = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
@@ -237,4 +237,107 @@ fn module_surface() {
     let _: fn(&Series, StlOpts) -> Result<DataFrame, PolarsCompatError> = polars_compat::stl;
     let _: fn(&Series, SeasonalDecomposeOpts) -> Result<DataFrame, PolarsCompatError> =
         polars_compat::seasonal_decompose;
+}
+
+// ── Missing::Interpolate via the polars layer ──────────────────────────
+
+fn airpassengers_like(n: usize, period: usize) -> Vec<f64> {
+    (0..n)
+        .map(|i| {
+            let phase = 2.0 * std::f64::consts::PI * (i % period) as f64 / period as f64;
+            100.0 + 0.5 * i as f64 + 30.0 * phase.sin()
+        })
+        .collect()
+}
+
+#[test]
+fn stl_interpolate_handles_polars_nulls() {
+    let period = 12;
+    let n = 144;
+    let raw = airpassengers_like(n, period);
+    let mut with_nulls: Vec<Option<f64>> = raw.iter().map(|v| Some(*v)).collect();
+    with_nulls[20] = None;
+    with_nulls[21] = None;
+    with_nulls[80] = None;
+
+    let s = Series::new("y".into(), with_nulls);
+
+    let opts = StlOpts {
+        missing: Missing::Interpolate,
+        ..StlOpts::new(period as u32)
+    };
+    let df = stl(&s, opts).unwrap();
+    assert_eq!(df.height(), n);
+
+    let trend    = float_col(&df, "trend");
+    let seasonal = float_col(&df, "seasonal");
+    let residual = float_col(&df, "residual");
+
+    let null_positions = [20usize, 21, 80];
+    for i in 0..n {
+        assert!(trend.get(i).unwrap().is_finite(), "trend at i={i} should be finite");
+        assert!(seasonal.get(i).unwrap().is_finite(), "seasonal at i={i} should be finite");
+
+        let was_null = null_positions.contains(&i);
+        let r = residual.get(i).unwrap();
+        if was_null {
+            assert!(r.is_nan(), "residual at originally-null i={i} should be NaN; got {r}");
+        } else {
+            assert!(r.is_finite(), "residual at i={i} should be finite");
+        }
+    }
+}
+
+#[test]
+fn stl_error_default_still_rejects_polars_nulls() {
+    // With Missing::Error (the default) the polars adapter must still
+    // fail fast on any null.
+    let mut v: Vec<Option<f64>> = airpassengers_like(48, 4).iter().map(|x| Some(*x)).collect();
+    v[3] = None;
+    let s = Series::new("y".into(), v);
+    let err = stl(&s, StlOpts::new(4)).unwrap_err();
+    assert!(matches!(err, PolarsCompatError::HasNulls { col, .. } if col == "y"));
+}
+
+#[test]
+fn stl_batch_interpolate_handles_polars_nulls() {
+    let n = 144;
+    let period = 12u32;
+
+    let a = airpassengers_like(n, period as usize);
+    let mut b: Vec<Option<f64>> = a.iter().map(|v| Some(*v)).collect();
+    b[40] = None;
+    b[41] = None;
+
+    let df = DataFrame::new(
+        n,
+        vec![
+            Series::new("clean".into(), a).into_column(),
+            Series::new("gappy".into(), b).into_column(),
+        ],
+    )
+    .unwrap();
+
+    let opts = StlOpts {
+        missing: Missing::Interpolate,
+        ..StlOpts::new(period)
+    };
+    let res = stl_batch(&df, opts).unwrap();
+
+    // Clean column: finite residual everywhere.
+    let r_clean = float_col(&res.residual, "clean");
+    for i in 0..n {
+        assert!(r_clean.get(i).unwrap().is_finite());
+    }
+
+    // Gappy column: NaN residual at originally-null positions only.
+    let r_gappy = float_col(&res.residual, "gappy");
+    for i in 0..n {
+        let was_null = i == 40 || i == 41;
+        if was_null {
+            assert!(r_gappy.get(i).unwrap().is_nan(), "i={i}");
+        } else {
+            assert!(r_gappy.get(i).unwrap().is_finite(), "i={i}");
+        }
+    }
 }
