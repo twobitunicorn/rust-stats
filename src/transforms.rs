@@ -139,6 +139,14 @@ pub fn box_cox_lambda_mle(y: &[f64]) -> Result<f64, BoxCoxError> {
     Ok(golden_section_minimize(&neg_loglik, -2.0, 2.0, 1e-8, 200))
 }
 
+/// Alias for [`box_cox_lambda_mle`]. R's `forecast::BoxCox.lambda`
+/// calls the same procedure `method = "loglik"`; this name is here for
+/// callers porting code from R.
+#[inline]
+pub fn box_cox_lambda_loglik(y: &[f64]) -> Result<f64, BoxCoxError> {
+    box_cox_lambda_mle(y)
+}
+
 /// Pick λ for `box_cox` by Guerrero's (1993) criterion. Splits the
 /// series into consecutive blocks of length `period`; for each block
 /// computes the ratio `σ_b / μ_b^(1 − λ)`; returns the λ that minimises
@@ -710,6 +718,15 @@ mod tests {
         assert!(
             lmbda.abs() < 0.5,
             "expected λ near 0 for lognormal data, got {lmbda}"
+        );
+    }
+
+    #[test]
+    fn loglik_is_alias_for_mle() {
+        let y: Vec<f64> = (1..=100).map(|i| (i as f64).sqrt() + 5.0).collect();
+        assert_eq!(
+            box_cox_lambda_loglik(&y).unwrap(),
+            box_cox_lambda_mle(&y).unwrap()
         );
     }
 
