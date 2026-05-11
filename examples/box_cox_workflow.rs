@@ -9,10 +9,7 @@
 //!
 //!   cargo run --release --example box_cox_workflow
 
-use rust_stats::{
-    arima, box_cox, box_cox_lambda_guerrero, box_cox_lambda_mle, box_cox_lambda_pearsonr,
-    inv_box_cox, ArimaOpts,
-};
+use rust_stats::{arima, box_cox, inv_box_cox, ArimaOpts, Lambda};
 
 fn main() {
     // ── 1. Build a monthly series with multiplicative variance. ─────
@@ -27,7 +24,8 @@ fn main() {
             y.push(level * (1.0 + 0.3 * phase.sin()));
         }
     }
-    println!("series length = {}, range = [{:.1}, {:.1}]",
+    println!(
+        "series length = {}, range = [{:.1}, {:.1}]",
         y.len(),
         y.iter().copied().fold(f64::INFINITY, f64::min),
         y.iter().copied().fold(f64::NEG_INFINITY, f64::max),
@@ -41,39 +39,39 @@ fn main() {
     //    - Pearson r: maximises the Q-Q correlation of the
     //      transformed values against theoretical normal quantiles —
     //      same goal as MLE but rank-based, so more robust to outliers.
-    let lambda_guerrero = box_cox_lambda_guerrero(&y, m).unwrap();
-    let lambda_mle = box_cox_lambda_mle(&y).unwrap();
-    let lambda_pearson = box_cox_lambda_pearsonr(&y).unwrap();
+    //
+    //    Calling `box_cox` with each `Lambda` variant returns a
+    //    `BoxCoxOutput { transformed, lambda }`. We pull `.lambda` off
+    //    each one for the comparison table.
+    let guerrero = box_cox(&y, Lambda::Guerrero { period: m }).unwrap();
+    let mle = box_cox(&y, Lambda::Mle).unwrap();
+    let pearson = box_cox(&y, Lambda::Pearsonr).unwrap();
     println!("\nλ comparison:");
-    println!("  Guerrero  = {:.3}   (variance stabilisation)", lambda_guerrero);
-    println!("  MLE       = {:.3}   (marginal Gaussianity, full likelihood)", lambda_mle);
-    println!("  Pearson r = {:.3}   (marginal Gaussianity, rank-based)", lambda_pearson);
+    println!("  Guerrero  = {:.3}   (variance stabilisation)", guerrero.lambda);
+    println!("  MLE       = {:.3}   (marginal Gaussianity, full likelihood)", mle.lambda);
+    println!("  Pearson r = {:.3}   (marginal Gaussianity, rank-based)", pearson.lambda);
 
-    // For a forecasting workflow on a seasonal series, prefer Guerrero:
-    let lambda = lambda_guerrero;
+    // For a forecasting workflow on a seasonal series, prefer Guerrero.
+    // `guerrero.transformed` is already the Box-Cox-transformed series,
+    // and `guerrero.lambda` is the λ we'll need to invert later.
+    let z = guerrero.transformed;
+    let lambda = guerrero.lambda;
     println!("\nUsing Guerrero λ = {:.3} for the SARIMA fit.", lambda);
 
-    // ── 3. Transform y → z on a stabilised scale. ───────────────────
-    let z = box_cox(&y, lambda).unwrap();
-
-    // ── 4. Fit SARIMA on the transformed series. ────────────────────
+    // ── 3. Fit SARIMA on the transformed series. ────────────────────
     //    For an automated search, swap in:
     //    `auto_arima(&z, AutoArimaOpts::seasonal(m as u32))`.
-    let fit = arima(
-        &z,
-        ArimaOpts::seasonal(1, 1, 1, 0, 1, 1, m as u32),
-    )
-    .unwrap();
+    let fit = arima(&z, ArimaOpts::seasonal(1, 1, 1, 0, 1, 1, m as u32)).unwrap();
     println!(
         "fit: AICc = {:.2}, σ² = {:.5}, n_obs = {}",
         fit.aicc, fit.sigma2, fit.n_obs,
     );
 
-    // ── 5. Forecast on the transformed scale with 95% intervals. ────
+    // ── 4. Forecast on the transformed scale with 95% intervals. ────
     let horizon = 12;
     let f = fit.forecast_with_intervals(horizon, 0.05);
 
-    // ── 6. Back-transform the mean and the interval bounds. ─────────
+    // ── 5. Back-transform the mean and the interval bounds. ─────────
     //    inv_box_cox is monotonic, so transforming the lower / upper
     //    quantiles individually gives correctly-calibrated bounds on
     //    the original scale. They will be asymmetric around the
@@ -92,9 +90,9 @@ fn main() {
         );
     }
 
-    // ── 7. Sanity: forward / inverse should round-trip the input. ───
-    let z_back = box_cox(&y, lambda).unwrap();
-    let y_back = inv_box_cox(&z_back, lambda).unwrap();
+    // ── 6. Sanity: forward / inverse should round-trip the input. ───
+    let again = box_cox(&y, lambda).unwrap();
+    let y_back = inv_box_cox(&again.transformed, again.lambda).unwrap();
     let max_err = y
         .iter()
         .zip(&y_back)

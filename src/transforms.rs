@@ -79,18 +79,70 @@ pub fn inv_box_cox(y: &[f64], lmbda: f64) -> Result<Vec<f64>, BoxCoxError> {
     Ok(out)
 }
 
-/// Pick λ for `box_cox` by maximum likelihood under the Gaussian model
-/// for the transformed series (the standard `scipy.stats.boxcox`
-/// objective):
+/// Specification for `box_cox`'s λ parameter — either a fixed numeric
+/// value or one of the supported automatic-estimation methods.
+///
+/// The `box_cox` function accepts anything `impl Into<Lambda>`, and a
+/// blanket `From<f64>` conversion is provided, so plain literals work
+/// out of the box:
+///
+/// ```ignore
+/// box_cox(&y, 0.5)?;                             // fixed λ
+/// box_cox(&y, Lambda::Mle)?;                     // auto, MLE
+/// box_cox(&y, Lambda::Pearsonr)?;                // auto, Q-Q robust
+/// box_cox(&y, Lambda::Guerrero { period: 12 })?; // auto, R-style
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Lambda {
+    /// Use the caller-supplied λ verbatim.
+    Fixed(f64),
+    /// Maximum-likelihood estimate under a Gaussian model for the
+    /// transformed series. Matches `scipy.stats.boxcox(x)` and R
+    /// `forecast::BoxCox.lambda(method = "loglik")`.
+    Mle,
+    /// Maximise the Pearson correlation between the *sorted*
+    /// transformed values and the corresponding theoretical normal
+    /// quantiles. Matches `scipy.stats.boxcox_normmax(x,
+    /// method = "pearsonr")`. Rank-based, so more robust to outliers
+    /// than `Mle`.
+    Pearsonr,
+    /// Guerrero (1993) variance-stabilisation criterion: minimise the
+    /// coefficient of variation of `σ_b / μ_b^(1−λ)` across consecutive
+    /// cycles of length `period`. Matches R
+    /// `forecast::BoxCox.lambda(method = "guerrero")`. The canonical
+    /// choice for forecasting workflows with seasonal data.
+    Guerrero { period: usize },
+}
+
+impl From<f64> for Lambda {
+    #[inline]
+    fn from(v: f64) -> Self {
+        Lambda::Fixed(v)
+    }
+}
+
+/// Result of [`box_cox`]: the transformed series and the λ that was
+/// used. The λ is always returned (even when the caller supplied one
+/// explicitly) so the same value can be threaded into [`inv_box_cox`]
+/// for the back-transformation without bookkeeping.
+#[derive(Debug, Clone)]
+pub struct BoxCoxOutput {
+    /// Box-Cox-transformed series, same length as the input.
+    pub transformed: Vec<f64>,
+    /// The λ value that was applied — either the caller's fixed input
+    /// or the estimator's output.
+    pub lambda: f64,
+}
+
+/// Maximum-likelihood λ under the Gaussian transformed-series model
+/// (the `scipy.stats.boxcox` objective):
 ///
 /// ```text
-/// L(λ) = -n/2 · ln σ²(λ) + (λ − 1) · Σ ln x_i,
+/// L(λ) = -n/2 · ln σ²(λ) + (λ − 1) · Σ ln x_i.
 /// ```
 ///
-/// where `σ²(λ)` is the variance of the transformed series. We minimise
-/// `−L` over `λ ∈ [-2, 2]` by golden-section search. Requires every
-/// finite input to be strictly positive.
-pub fn box_cox_lambda_mle(y: &[f64]) -> Result<f64, BoxCoxError> {
+/// Internal helper for [`Lambda::Mle`].
+fn lambda_mle(y: &[f64]) -> Result<f64, BoxCoxError> {
     let mut min_finite = f64::INFINITY;
     let mut log_sum = 0.0;
     let mut n_finite = 0usize;
@@ -139,25 +191,8 @@ pub fn box_cox_lambda_mle(y: &[f64]) -> Result<f64, BoxCoxError> {
     Ok(golden_section_minimize(&neg_loglik, -2.0, 2.0, 1e-8, 200))
 }
 
-/// Alias for [`box_cox_lambda_mle`]. R's `forecast::BoxCox.lambda`
-/// calls the same procedure `method = "loglik"`; this name is here for
-/// callers porting code from R.
-#[inline]
-pub fn box_cox_lambda_loglik(y: &[f64]) -> Result<f64, BoxCoxError> {
-    box_cox_lambda_mle(y)
-}
-
-/// Pick λ for `box_cox` by maximising the Pearson correlation between
-/// the *sorted* transformed values and the corresponding theoretical
-/// normal quantiles (Blom's plotting positions). Equivalent to finding
-/// the λ whose normal Q-Q plot is straightest. Matches
-/// `scipy.stats.boxcox_normmax(x, method='pearsonr')`.
-///
-/// More robust to outliers and heavy tails than the likelihood-based
-/// MLE estimator because it operates on order statistics rather than
-/// the full likelihood. Both estimators target marginal normality;
-/// Guerrero targets variance stabilisation instead.
-pub fn box_cox_lambda_pearsonr(y: &[f64]) -> Result<f64, BoxCoxError> {
+/// Pearson Q-Q-correlation λ. Internal helper for [`Lambda::Pearsonr`].
+fn lambda_pearsonr(y: &[f64]) -> Result<f64, BoxCoxError> {
     let mut min_finite = f64::INFINITY;
     let mut n_finite = 0usize;
     for &v in y {
@@ -276,16 +311,9 @@ fn inv_phi(p: f64) -> f64 {
     }
 }
 
-/// Pick λ for `box_cox` by Guerrero's (1993) criterion. Splits the
-/// series into consecutive blocks of length `period`; for each block
-/// computes the ratio `σ_b / μ_b^(1 − λ)`; returns the λ that minimises
-/// the coefficient of variation of those ratios. Matches the default
-/// behaviour of R's `forecast::BoxCox.lambda(x, method = "guerrero")`.
-///
-/// Typically used to stabilise seasonal variance: when λ is at its
-/// optimum, the within-cycle spread is proportional to the within-cycle
-/// mean raised to `1 − λ`, and the ratios stop varying across cycles.
-pub fn box_cox_lambda_guerrero(y: &[f64], period: usize) -> Result<f64, BoxCoxError> {
+/// Guerrero (1993) variance-stabilisation λ. Internal helper for
+/// [`Lambda::Guerrero`].
+fn lambda_guerrero(y: &[f64], period: usize) -> Result<f64, BoxCoxError> {
     if period < 2 {
         return Err(BoxCoxError::InvalidPeriod(period));
     }
@@ -382,18 +410,51 @@ fn golden_section_minimize<F: Fn(f64) -> f64>(
     }
 }
 
-/// Box-Cox power transformation with a fixed `lmbda`:
+/// Box-Cox power transformation.
 ///
 /// ```text
 /// (x^λ − 1) / λ   when λ ≠ 0
 /// ln(x)           when λ = 0
 /// ```
 ///
+/// The second argument can be either a numeric λ (via the `From<f64>`
+/// conversion) or a [`Lambda`] enum variant that selects an automatic
+/// estimator:
+///
+/// ```ignore
+/// box_cox(&y, 0.5)?;                                    // fixed
+/// box_cox(&y, Lambda::Mle)?;                            // MLE
+/// box_cox(&y, Lambda::Pearsonr)?;                       // Q-Q (robust)
+/// box_cox(&y, Lambda::Guerrero { period: 12 })?;        // R-style
+/// ```
+///
+/// Returns a [`BoxCoxOutput`] carrying both the transformed series and
+/// the λ that was applied. The λ is needed by [`inv_box_cox`] to
+/// reverse the transformation, so it's always returned — even when the
+/// caller supplied a fixed value (in which case `out.lambda` simply
+/// echoes the input).
+///
 /// Requires every finite input to be strictly positive. `NaN` entries
 /// propagate to the output unchanged; `+∞` is treated as finite for
-/// propagation purposes but never satisfies the positivity check on its
-/// own (only finite values gate the check).
-pub fn box_cox(y: &[f64], lmbda: f64) -> Result<Vec<f64>, BoxCoxError> {
+/// propagation purposes but never satisfies the positivity check on
+/// its own (only finite values gate the check).
+pub fn box_cox(y: &[f64], lambda: impl Into<Lambda>) -> Result<BoxCoxOutput, BoxCoxError> {
+    let lmbda = match lambda.into() {
+        Lambda::Fixed(v) => v,
+        Lambda::Mle => lambda_mle(y)?,
+        Lambda::Pearsonr => lambda_pearsonr(y)?,
+        Lambda::Guerrero { period } => lambda_guerrero(y, period)?,
+    };
+    let transformed = box_cox_apply(y, lmbda)?;
+    Ok(BoxCoxOutput {
+        transformed,
+        lambda: lmbda,
+    })
+}
+
+/// Apply Box-Cox with a known λ. Internal helper — public callers go
+/// through [`box_cox`].
+fn box_cox_apply(y: &[f64], lmbda: f64) -> Result<Vec<f64>, BoxCoxError> {
     let mut min_finite = f64::INFINITY;
     for &v in y {
         if v.is_finite() && v < min_finite {
@@ -742,17 +803,18 @@ mod tests {
     #[test]
     fn box_cox_lmbda_zero_is_ln() {
         let out = box_cox(&[1.0, std::f64::consts::E], 0.0).unwrap();
-        assert_relative_eq!(out[0], 0.0, max_relative = 1e-12, epsilon = 1e-12);
-        assert_relative_eq!(out[1], 1.0, max_relative = 1e-12);
+        assert_eq!(out.lambda, 0.0);
+        assert_relative_eq!(out.transformed[0], 0.0, max_relative = 1e-12, epsilon = 1e-12);
+        assert_relative_eq!(out.transformed[1], 1.0, max_relative = 1e-12);
     }
 
     #[test]
     fn box_cox_lmbda_two() {
         // (x^2 - 1) / 2
         let out = box_cox(&[1.0, 2.0, 3.0], 2.0).unwrap();
-        assert_relative_eq!(out[0], 0.0, max_relative = 1e-12, epsilon = 1e-12);
-        assert_relative_eq!(out[1], 1.5);
-        assert_relative_eq!(out[2], 4.0);
+        assert_relative_eq!(out.transformed[0], 0.0, max_relative = 1e-12, epsilon = 1e-12);
+        assert_relative_eq!(out.transformed[1], 1.5);
+        assert_relative_eq!(out.transformed[2], 4.0);
     }
 
     #[test]
@@ -764,9 +826,16 @@ mod tests {
     #[test]
     fn box_cox_propagates_nan() {
         let out = box_cox(&[1.0, f64::NAN, 4.0], 2.0).unwrap();
-        assert_eq!(out[0], 0.0);
-        assert!(out[1].is_nan());
-        assert_relative_eq!(out[2], 7.5);
+        assert_eq!(out.transformed[0], 0.0);
+        assert!(out.transformed[1].is_nan());
+        assert_relative_eq!(out.transformed[2], 7.5);
+    }
+
+    #[test]
+    fn box_cox_echoes_fixed_lambda() {
+        // The returned `lambda` should match whatever the caller passed.
+        let out = box_cox(&[1.0, 2.0, 4.0], 0.75).unwrap();
+        assert_eq!(out.lambda, 0.75);
     }
 
     // --- inverse Box-Cox ---
@@ -783,7 +852,7 @@ mod tests {
     fn inv_box_cox_lambda_two_roundtrips() {
         let x = vec![1.0, 2.0, 3.5, 7.25];
         let y = box_cox(&x, 2.0).unwrap();
-        let back = inv_box_cox(&y, 2.0).unwrap();
+        let back = inv_box_cox(&y.transformed, y.lambda).unwrap();
         for (a, b) in x.iter().zip(back.iter()) {
             assert_relative_eq!(a, b, max_relative = 1e-12);
         }
@@ -793,7 +862,7 @@ mod tests {
     fn inv_box_cox_lambda_half_roundtrips() {
         let x = vec![1.0, 2.0, 4.0, 8.0, 16.0];
         let y = box_cox(&x, 0.5).unwrap();
-        let back = inv_box_cox(&y, 0.5).unwrap();
+        let back = inv_box_cox(&y.transformed, y.lambda).unwrap();
         for (a, b) in x.iter().zip(back.iter()) {
             assert_relative_eq!(a, b, max_relative = 1e-12);
         }
@@ -814,103 +883,81 @@ mod tests {
         assert!(matches!(err, BoxCoxError::NonInvertible { .. }));
     }
 
-    // --- λ estimators ---
+    // --- Lambda estimators (Mle / Pearsonr / Guerrero) ---
 
     #[test]
-    fn mle_returns_lambda_near_one_for_normal_data() {
-        // A near-Gaussian, strictly positive series: μ=10, σ=1.
-        // λ ≈ 1 means "no transform needed" — the data is already normal.
+    fn lambda_mle_near_one_on_normal_data() {
         let y: Vec<f64> = (0..200)
             .map(|i| {
                 let t = (i as f64) * 0.31;
                 10.0 + t.sin() + (t * 1.7).cos() * 0.5 + (t * 0.3).sin() * 0.3
             })
             .collect();
-        let lmbda = box_cox_lambda_mle(&y).unwrap();
+        let out = box_cox(&y, Lambda::Mle).unwrap();
         assert!(
-            (lmbda - 1.0).abs() < 0.5,
-            "expected λ near 1 for ~normal data, got {lmbda}"
+            (out.lambda - 1.0).abs() < 0.5,
+            "expected λ near 1 for ~normal data, got {}",
+            out.lambda
         );
     }
 
     #[test]
-    fn mle_returns_lambda_near_zero_for_lognormal_data() {
-        // exp(x) where x is near-normal — Box-Cox MLE should pick λ ≈ 0
-        // (log transform restores normality).
+    fn lambda_mle_near_zero_on_lognormal_data() {
         let y: Vec<f64> = (0..200)
             .map(|i| {
                 let t = (i as f64) * 0.31;
                 (t.sin() + (t * 1.7).cos() * 0.5).exp() * 10.0
             })
             .collect();
-        let lmbda = box_cox_lambda_mle(&y).unwrap();
+        let out = box_cox(&y, Lambda::Mle).unwrap();
         assert!(
-            lmbda.abs() < 0.5,
-            "expected λ near 0 for lognormal data, got {lmbda}"
+            out.lambda.abs() < 0.5,
+            "expected λ near 0 for lognormal data, got {}",
+            out.lambda
         );
     }
 
     #[test]
-    fn loglik_is_alias_for_mle() {
-        let y: Vec<f64> = (1..=100).map(|i| (i as f64).sqrt() + 5.0).collect();
-        assert_eq!(
-            box_cox_lambda_loglik(&y).unwrap(),
-            box_cox_lambda_mle(&y).unwrap()
-        );
-    }
-
-    // --- Pearson-r λ estimator ---
-
-    #[test]
-    fn pearsonr_near_one_on_normal_data() {
-        // Approximately-normal positive data → identity transform.
+    fn lambda_pearsonr_near_one_on_normal_data() {
         let y: Vec<f64> = (0..200)
             .map(|i| {
                 let t = i as f64 * 0.31;
                 10.0 + t.sin() + (t * 1.7).cos() * 0.5 + (t * 0.3).sin() * 0.3
             })
             .collect();
-        let lmbda = box_cox_lambda_pearsonr(&y).unwrap();
-        assert!(
-            (lmbda - 1.0).abs() < 0.5,
-            "expected λ ≈ 1, got {lmbda}"
-        );
+        let out = box_cox(&y, Lambda::Pearsonr).unwrap();
+        assert!((out.lambda - 1.0).abs() < 0.5, "got {}", out.lambda);
     }
 
     #[test]
-    fn pearsonr_near_zero_on_lognormal_data() {
-        // Lognormal-ish → log transform.
+    fn lambda_pearsonr_near_zero_on_lognormal_data() {
         let y: Vec<f64> = (0..200)
             .map(|i| {
                 let t = i as f64 * 0.31;
                 (t.sin() + (t * 1.7).cos() * 0.5).exp() * 10.0
             })
             .collect();
-        let lmbda = box_cox_lambda_pearsonr(&y).unwrap();
-        assert!(lmbda.abs() < 0.5, "expected λ ≈ 0, got {lmbda}");
+        let out = box_cox(&y, Lambda::Pearsonr).unwrap();
+        assert!(out.lambda.abs() < 0.5, "got {}", out.lambda);
     }
 
     #[test]
-    fn pearsonr_rejects_non_positive() {
-        let err = box_cox_lambda_pearsonr(&[1.0, -2.0, 3.0]).unwrap_err();
+    fn lambda_pearsonr_rejects_non_positive() {
+        let err = box_cox(&[1.0, -2.0, 3.0], Lambda::Pearsonr).unwrap_err();
         assert!(matches!(err, BoxCoxError::NonPositive { .. }));
     }
 
     #[test]
-    fn pearsonr_more_robust_to_outliers_than_mle() {
-        // Construct a near-Gaussian series, then plant one big outlier.
-        // MLE's likelihood penalises this hard; Pearson r only sees one
-        // order-statistic shift. The robust estimator should land
-        // closer to 1 than the MLE under this perturbation.
+    fn lambda_pearsonr_close_to_mle_under_outlier() {
+        // Both estimators target marginal normality; under a single
+        // outlier the MLE pulls harder than the Q-Q-correlation form,
+        // but they should still land in the same ballpark.
         let mut y: Vec<f64> = (0..200)
             .map(|i| 10.0 + (i as f64 * 0.31).sin() * 0.5)
             .collect();
-        // One severe positive outlier.
         y[100] = 200.0;
-        let mle = box_cox_lambda_mle(&y).unwrap();
-        let pearson = box_cox_lambda_pearsonr(&y).unwrap();
-        // Both pull λ away from 1; just check they're finite and not
-        // wildly different. The exact relationship depends on the data.
+        let mle = box_cox(&y, Lambda::Mle).unwrap().lambda;
+        let pearson = box_cox(&y, Lambda::Pearsonr).unwrap().lambda;
         assert!(mle.is_finite() && pearson.is_finite());
         assert!(
             (mle - pearson).abs() < 1.5,
@@ -919,15 +966,15 @@ mod tests {
     }
 
     #[test]
-    fn mle_rejects_non_positive() {
-        let err = box_cox_lambda_mle(&[1.0, -2.0, 3.0]).unwrap_err();
+    fn lambda_mle_rejects_non_positive() {
+        let err = box_cox(&[1.0, -2.0, 3.0], Lambda::Mle).unwrap_err();
         assert!(matches!(err, BoxCoxError::NonPositive { .. }));
     }
 
     #[test]
-    fn guerrero_rejects_invalid_period() {
+    fn lambda_guerrero_rejects_invalid_period() {
         let y = vec![1.0; 100];
-        let err = box_cox_lambda_guerrero(&y, 1).unwrap_err();
+        let err = box_cox(&y, Lambda::Guerrero { period: 1 }).unwrap_err();
         assert!(matches!(err, BoxCoxError::InvalidPeriod(1)));
     }
 
@@ -950,12 +997,13 @@ mod tests {
                 y.push(level * (1.0 + 0.2 * seasonal));
             }
         }
-        let lmbda = box_cox_lambda_guerrero(&y, period).unwrap();
+        let out = box_cox(&y, Lambda::Guerrero { period }).unwrap();
         // Guerrero should return small λ — close to 0 or even slightly
         // negative — indicating a log-ish transform.
         assert!(
-            lmbda < 0.5,
-            "expected small λ for multiplicative-variance series, got {lmbda}"
+            out.lambda < 0.5,
+            "expected small λ for multiplicative-variance series, got {}",
+            out.lambda,
         );
     }
 
@@ -974,10 +1022,11 @@ mod tests {
                 y.push(10.0 + 0.5 * c as f64 + seasonal);
             }
         }
-        let lmbda = box_cox_lambda_guerrero(&y, period).unwrap();
+        let out = box_cox(&y, Lambda::Guerrero { period }).unwrap();
         assert!(
-            (lmbda - 1.0).abs() < 0.5,
-            "expected λ near 1 for additive-variance series, got {lmbda}"
+            (out.lambda - 1.0).abs() < 0.5,
+            "expected λ near 1 for additive-variance series, got {}",
+            out.lambda,
         );
     }
 

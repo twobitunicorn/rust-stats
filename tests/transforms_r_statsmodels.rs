@@ -21,10 +21,7 @@
 
 use approx::assert_relative_eq;
 use rust_stats::error::BoxCoxError;
-use rust_stats::{
-    box_cox, box_cox_lambda_guerrero, box_cox_lambda_mle, box_cox_lambda_pearsonr, center,
-    inv_box_cox, min_max_scale, z_score,
-};
+use rust_stats::{box_cox, center, inv_box_cox, min_max_scale, z_score, Lambda};
 
 /// numpy.testing.assert_almost_equal semantics: tolerance = 1.5 * 10^-decimal.
 fn approx_eq(a: f64, b: f64, decimal: i32, ctx: &str) {
@@ -229,7 +226,7 @@ fn min_max_empty() {
 fn box_cox_lambda_zero_is_log() {
     let out = box_cox(&[1.0, 2.0, 4.0, 8.0], 0.0).unwrap();
     let expected = [0.0, 2f64.ln(), 4f64.ln(), 8f64.ln()];
-    for (i, (&a, &e)) in out.iter().zip(expected.iter()).enumerate() {
+    for (i, (&a, &e)) in out.transformed.iter().zip(expected.iter()).enumerate() {
         approx_eq(a, e, 12, &format!("ln[{i}]"));
     }
 }
@@ -238,7 +235,7 @@ fn box_cox_lambda_zero_is_log() {
 #[test]
 fn box_cox_lambda_one_is_shift() {
     let out = box_cox(&[1.0, 2.0, 4.0, 8.0], 1.0).unwrap();
-    assert_eq!(out, vec![0.0, 1.0, 3.0, 7.0]);
+    assert_eq!(out.transformed, vec![0.0, 1.0, 3.0, 7.0]);
 }
 
 /// λ = 0.5 → `2 * (sqrt(x) - 1)`. scipy returns the same.
@@ -251,7 +248,7 @@ fn box_cox_lambda_half_matches_scipy() {
         2.0,
         2.0 * (8f64.sqrt() - 1.0),
     ];
-    for (i, (&a, &e)) in out.iter().zip(expected.iter()).enumerate() {
+    for (i, (&a, &e)) in out.transformed.iter().zip(expected.iter()).enumerate() {
         approx_eq(a, e, 12, &format!("bc05[{i}]"));
     }
 }
@@ -260,7 +257,7 @@ fn box_cox_lambda_half_matches_scipy() {
 #[test]
 fn box_cox_lambda_two_matches_scipy() {
     let out = box_cox(&[1.0, 2.0, 3.0], 2.0).unwrap();
-    assert_eq!(out, vec![0.0, 1.5, 4.0]);
+    assert_eq!(out.transformed, vec![0.0, 1.5, 4.0]);
 }
 
 /// λ = -1 → `1 - 1/x`. scipy returns the same.
@@ -268,7 +265,7 @@ fn box_cox_lambda_two_matches_scipy() {
 fn box_cox_lambda_minus_one_matches_scipy() {
     let out = box_cox(&[1.0, 2.0, 4.0, 8.0], -1.0).unwrap();
     let expected = [0.0, 0.5, 0.75, 0.875];
-    for (i, (&a, &e)) in out.iter().zip(expected.iter()).enumerate() {
+    for (i, (&a, &e)) in out.transformed.iter().zip(expected.iter()).enumerate() {
         approx_eq(a, e, 12, &format!("bcm1[{i}]"));
     }
 }
@@ -293,9 +290,9 @@ fn box_cox_rejects_negative_like_scipy() {
 #[test]
 fn box_cox_nan_propagates() {
     let out = box_cox(&[1.0, f64::NAN, 4.0], 0.5).unwrap();
-    approx_eq(out[0], 0.0, 12, "bc05_nan[0]");
-    assert!(out[1].is_nan());
-    approx_eq(out[2], 2.0 * (2.0 - 1.0), 12, "bc05_nan[2]");
+    approx_eq(out.transformed[0], 0.0, 12, "bc05_nan[0]");
+    assert!(out.transformed[1].is_nan());
+    approx_eq(out.transformed[2], 2.0 * (2.0 - 1.0), 12, "bc05_nan[2]");
 }
 
 /// As λ → 0, `(x^λ − 1)/λ` should converge to `ln x`. Spot-check at
@@ -303,7 +300,7 @@ fn box_cox_nan_propagates() {
 #[test]
 fn box_cox_limit_lambda_to_zero_matches_log() {
     let out_small = box_cox(&[2.0], 1e-6).unwrap();
-    approx_eq(out_small[0], 2f64.ln(), 5, "bc(2, 1e-6) ≈ ln 2");
+    approx_eq(out_small.transformed[0], 2f64.ln(), 5, "bc(2, 1e-6) ≈ ln 2");
 }
 
 // ============================================================================
@@ -327,7 +324,7 @@ fn inv_box_cox_roundtrips_match_scipy() {
     let x = vec![1.0, 2.0, 4.0, 8.0, 16.0];
     for lmbda in [0.0_f64, 0.5, 1.0, 2.0, -1.0] {
         let y = box_cox(&x, lmbda).unwrap();
-        let back = inv_box_cox(&y, lmbda).unwrap();
+        let back = inv_box_cox(&y.transformed, y.lambda).unwrap();
         for (i, (a, b)) in x.iter().zip(back.iter()).enumerate() {
             assert_relative_eq!(a, b, max_relative = 1e-10);
             let _ = i;
@@ -345,8 +342,8 @@ fn inv_box_cox_rejects_invalid_like_scipy() {
 }
 
 // ============================================================================
-// box_cox_lambda_mle  —  scipy.stats.boxcox (no lmbda) /
-//                       R MASS::boxcox / forecast::BoxCox.lambda(method="loglik")
+// box_cox(..., Lambda::Mle)  —  scipy.stats.boxcox (no lmbda) /
+//                              R MASS::boxcox / forecast::BoxCox.lambda(method="loglik")
 // ============================================================================
 
 /// On strictly-positive ~normal data, MLE λ should be close to 1
@@ -359,10 +356,11 @@ fn box_cox_mle_near_one_on_normal_like_data() {
             10.0 + (t.sin() + (t * 0.4).cos() * 0.5) * 0.5
         })
         .collect();
-    let lmbda = box_cox_lambda_mle(&y).unwrap();
+    let out = box_cox(&y, Lambda::Mle).unwrap();
     assert!(
-        (lmbda - 1.0).abs() < 0.5,
-        "expected λ ≈ 1 for normal-ish data, got {lmbda}"
+        (out.lambda - 1.0).abs() < 0.5,
+        "expected λ ≈ 1 for normal-ish data, got {}",
+        out.lambda,
     );
 }
 
@@ -376,15 +374,17 @@ fn box_cox_mle_near_zero_on_lognormal_data() {
             (t.sin() + (t * 0.4).cos() * 0.5).exp() * 10.0
         })
         .collect();
-    let lmbda = box_cox_lambda_mle(&y).unwrap();
+    let out = box_cox(&y, Lambda::Mle).unwrap();
     assert!(
-        lmbda.abs() < 0.5,
-        "expected λ ≈ 0 for lognormal data, got {lmbda}"
+        out.lambda.abs() < 0.5,
+        "expected λ ≈ 0 for lognormal data, got {}",
+        out.lambda,
     );
 }
 
 // ============================================================================
-// box_cox_lambda_guerrero  —  R forecast::BoxCox.lambda(method="guerrero")
+// box_cox(..., Lambda::Guerrero { period })
+//                       —  R forecast::BoxCox.lambda(method="guerrero")
 // ============================================================================
 
 /// Guerrero on a multiplicative-variance seasonal series should return
@@ -403,10 +403,11 @@ fn guerrero_small_lambda_on_multiplicative_variance() {
             y.push(level * (1.0 + 0.2 * phase.sin()));
         }
     }
-    let lmbda = box_cox_lambda_guerrero(&y, period).unwrap();
+    let out = box_cox(&y, Lambda::Guerrero { period }).unwrap();
     assert!(
-        lmbda < 0.5,
-        "expected small λ for multiplicative-variance series, got {lmbda}"
+        out.lambda < 0.5,
+        "expected small λ for multiplicative-variance series, got {}",
+        out.lambda,
     );
 }
 
@@ -423,15 +424,17 @@ fn guerrero_returns_lambda_near_one_for_constant_variance() {
             y.push(10.0 + 0.5 * c as f64 + phase.sin());
         }
     }
-    let lmbda = box_cox_lambda_guerrero(&y, period).unwrap();
+    let out = box_cox(&y, Lambda::Guerrero { period }).unwrap();
     assert!(
-        (lmbda - 1.0).abs() < 0.5,
-        "expected λ ≈ 1 for additive-variance series, got {lmbda}"
+        (out.lambda - 1.0).abs() < 0.5,
+        "expected λ ≈ 1 for additive-variance series, got {}",
+        out.lambda,
     );
 }
 
 // ============================================================================
-// box_cox_lambda_pearsonr  —  scipy.stats.boxcox_normmax(x, method="pearsonr")
+// box_cox(..., Lambda::Pearsonr)
+//                       —  scipy.stats.boxcox_normmax(x, method="pearsonr")
 // ============================================================================
 
 /// On near-Gaussian positive data, the Pearson-r objective should pick
@@ -445,10 +448,11 @@ fn pearsonr_near_one_on_normal_like_data() {
             10.0 + (t.sin() + (t * 0.4).cos() * 0.5) * 0.5
         })
         .collect();
-    let lmbda = box_cox_lambda_pearsonr(&y).unwrap();
+    let out = box_cox(&y, Lambda::Pearsonr).unwrap();
     assert!(
-        (lmbda - 1.0).abs() < 0.5,
-        "expected λ ≈ 1, got {lmbda}"
+        (out.lambda - 1.0).abs() < 0.5,
+        "expected λ ≈ 1, got {}",
+        out.lambda,
     );
 }
 
@@ -462,8 +466,8 @@ fn pearsonr_near_zero_on_lognormal_data() {
             (t.sin() + (t * 0.4).cos() * 0.5).exp() * 10.0
         })
         .collect();
-    let lmbda = box_cox_lambda_pearsonr(&y).unwrap();
-    assert!(lmbda.abs() < 0.5, "expected λ ≈ 0, got {lmbda}");
+    let out = box_cox(&y, Lambda::Pearsonr).unwrap();
+    assert!(out.lambda.abs() < 0.5, "expected λ ≈ 0, got {}", out.lambda);
 }
 
 /// Pearson-r and MLE both target marginal normality and should agree
@@ -474,8 +478,8 @@ fn pearsonr_agrees_with_mle_on_smooth_data() {
     let y: Vec<f64> = (0..500)
         .map(|i| 10.0 + ((i as f64) * 0.1).sin().exp() * 0.5)
         .collect();
-    let r = box_cox_lambda_pearsonr(&y).unwrap();
-    let m = box_cox_lambda_mle(&y).unwrap();
+    let r = box_cox(&y, Lambda::Pearsonr).unwrap().lambda;
+    let m = box_cox(&y, Lambda::Mle).unwrap().lambda;
     assert!(
         (r - m).abs() < 0.5,
         "pearsonr λ = {r} too far from mle λ = {m}"
@@ -486,6 +490,6 @@ fn pearsonr_agrees_with_mle_on_smooth_data() {
 fn guerrero_rejects_short_series_like_r() {
     // Period 12 but only one cycle — can't compute CV across cycles.
     let y = vec![1.0; 12];
-    let err = box_cox_lambda_guerrero(&y, 12).unwrap_err();
+    let err = box_cox(&y, Lambda::Guerrero { period: 12 }).unwrap_err();
     assert!(matches!(err, BoxCoxError::TooFewObservations { .. }));
 }

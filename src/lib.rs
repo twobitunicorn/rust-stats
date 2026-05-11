@@ -19,8 +19,7 @@ pub use error::{
 };
 pub use smoothing::{loess, loess_at};
 pub use transforms::{
-    box_cox, box_cox_lambda_guerrero, box_cox_lambda_loglik, box_cox_lambda_mle,
-    box_cox_lambda_pearsonr, center, inv_box_cox, min_max_scale, z_score,
+    box_cox, center, inv_box_cox, min_max_scale, z_score, BoxCoxOutput, Lambda,
 };
 pub use tsa::{
     arima, arima_with_exog, auto_arima, holt_winters, seasonal_decompose, stl, ArimaFit,
