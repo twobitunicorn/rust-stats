@@ -63,8 +63,15 @@ pub struct ArimaFit {
     /// `y_t = … + ε_t + θ₁ ε_{t−1} + …` (matches R `arima` /
     /// statsmodels `SARIMAX`).
     pub theta: Vec<f64>,
-    /// Intercept (mean of the differenced series; `0.0` if
-    /// `include_constant = false`).
+    /// Exogenous-regressor coefficients (one per `exog` column, in the
+    /// order they were passed). Empty when the model was fitted without
+    /// exogenous inputs.
+    pub beta: Vec<f64>,
+    /// Intercept. For an exog-free fit this is the mean of the
+    /// differenced series (`0.0` if `include_constant = false`). For an
+    /// exog fit it is the OLS intercept of the level regression
+    /// (`β_0`); the inner ARIMA is fitted on the residuals with no
+    /// additional constant.
     pub intercept: f64,
     /// Innovation variance σ² = SSE / n_effective.
     pub sigma2: f64,
@@ -99,6 +106,28 @@ const MAX_ORDER: u32 = 10;
 
 /// Fit an ARIMA(p, d, q) model by Conditional Sum of Squares.
 pub fn arima(y: &[f64], opts: ArimaOpts) -> Result<ArimaFit, ArimaError> {
+    arima_with_exog(y, &[], opts)
+}
+
+/// Fit an ARIMAX(p, d, q) model by two-stage Conditional Sum of Squares.
+///
+/// Stage 1: regress `y` on `[1, exog]` by OLS to recover the level
+/// intercept `β₀` and exogenous slopes `β`. Stage 2: fit a centered
+/// ARIMA(p, d, q) by CSS on the residuals `y − β₀ − exog·β`.
+///
+/// This is the simpler of the two standard ARIMAX estimators; R's
+/// `forecast::Arima(xreg=)` and statsmodels' SARIMAX would jointly
+/// maximise the likelihood instead. The two-stage estimator gives
+/// consistent (φ, θ, β) but slightly less efficient β when the
+/// residual process has strong autocorrelation.
+///
+/// `exog` is a slice of regressor columns, each of length `y.len()`.
+/// Empty `exog` is allowed and equivalent to [`arima`].
+pub fn arima_with_exog(
+    y: &[f64],
+    exog: &[&[f64]],
+    opts: ArimaOpts,
+) -> Result<ArimaFit, ArimaError> {
     if opts.p > MAX_ORDER || opts.q > MAX_ORDER || opts.d > 2 {
         return Err(ArimaError::InvalidOrder {
             p: opts.p,
@@ -106,6 +135,82 @@ pub fn arima(y: &[f64], opts: ArimaOpts) -> Result<ArimaFit, ArimaError> {
             q: opts.q,
         });
     }
+    let n = y.len();
+    // Validate exog shape.
+    for col in exog {
+        if col.len() != n {
+            return Err(ArimaError::SeriesTooShort {
+                n: col.len(),
+                min: n,
+                p: opts.p,
+                d: opts.d,
+                q: opts.q,
+            });
+        }
+    }
+    // Stage 1: OLS on [1, exog] if any regressors. Compute residuals.
+    let k = exog.len();
+    let (beta0, beta, residuals) = if k == 0 {
+        (0.0, Vec::new(), y.to_vec())
+    } else {
+        let cols = 1 + k;
+        let mut design = vec![0.0f64; n * cols];
+        for i in 0..n {
+            design[i * cols] = 1.0;
+            for j in 0..k {
+                design[i * cols + 1 + j] = exog[j][i];
+            }
+        }
+        let coefs = ols::solve(&design, y, n, cols).ok_or(ArimaError::Singular)?;
+        let b0 = coefs[0];
+        let b: Vec<f64> = coefs[1..].to_vec();
+        let mut r = y.to_vec();
+        for i in 0..n {
+            r[i] -= b0;
+            for j in 0..k {
+                r[i] -= b[j] * exog[j][i];
+            }
+        }
+        (b0, b, r)
+    };
+
+    // Stage 2: ARIMA on residuals. When exog is present we suppress the
+    // inner intercept (the level constant was absorbed by `beta0`).
+    let inner_opts = ArimaOpts {
+        include_constant: if k == 0 { opts.include_constant } else { false },
+        ..opts
+    };
+    let mut fit = arima_no_exog(&residuals, inner_opts)?;
+
+    // Patch with stage-1 outputs: intercept is β₀; β contains the exog
+    // slopes; fitted values get the stage-1 part added back.
+    //
+    // We deliberately keep `fit.last_obs` pointing at the residual's
+    // tail — forecasting integrates the inner ARIMA on the *residual*
+    // scale, then adds back (β₀ + β·x_future) to get the y-scale
+    // forecasts.
+    if k > 0 {
+        fit.intercept = beta0;
+        fit.beta = beta;
+        for i in 0..n {
+            let mut adj = beta0;
+            for j in 0..k {
+                adj += fit.beta[j] * exog[j][i];
+            }
+            // residual_t = y_t - (β₀ + β·x_t). Inner-ARIMA fitted_t is on
+            // the residual scale; original-scale fitted_t = β₀ + β·x_t +
+            // inner_fitted_t. Skip the warm-up rows the inner zeroed.
+            if fit.fitted[i] != 0.0 || fit.residuals[i] != 0.0 {
+                fit.fitted[i] += adj;
+            }
+        }
+    }
+    Ok(fit)
+}
+
+/// Internal: ARIMA fit with no exog. Pulled out so `arima_with_exog`
+/// can reuse the body after stage 1.
+fn arima_no_exog(y: &[f64], opts: ArimaOpts) -> Result<ArimaFit, ArimaError> {
     let n = y.len();
     let m = opts.p.max(opts.q) as usize;
     let d = opts.d as usize;
@@ -220,6 +325,7 @@ pub fn arima(y: &[f64], opts: ArimaOpts) -> Result<ArimaFit, ArimaError> {
     Ok(ArimaFit {
         phi,
         theta,
+        beta: Vec::new(),
         intercept,
         sigma2,
         log_likelihood: log_lik,
@@ -257,6 +363,28 @@ impl ArimaFit {
     /// differenced scale and then re-integrates against the last `d`
     /// observed values.
     pub fn forecast(&self, steps: usize) -> Vec<f64> {
+        // No-exog path: equivalent to forecast_exog with an empty matrix.
+        self.forecast_exog_impl(steps, &[])
+    }
+
+    /// Multi-step forecast for an ARIMAX model. `exog_future` is one
+    /// regressor column per stored `beta` slot; each must have length
+    /// `steps`.
+    pub fn forecast_exog(&self, exog_future: &[&[f64]]) -> Vec<f64> {
+        debug_assert_eq!(exog_future.len(), self.beta.len());
+        let steps = exog_future.first().map(|c| c.len()).unwrap_or(0);
+        self.forecast_exog_impl(steps, exog_future)
+    }
+
+    /// Multi-step forecast with prediction intervals for an ARIMAX model.
+    pub fn forecast_intervals_exog(&self, exog_future: &[&[f64]], alpha: f64) -> ForecastResult {
+        debug_assert_eq!(exog_future.len(), self.beta.len());
+        let steps = exog_future.first().map(|c| c.len()).unwrap_or(0);
+        let mean = self.forecast_exog_impl(steps, exog_future);
+        self.intervals_for(mean, steps, alpha)
+    }
+
+    fn forecast_exog_impl(&self, steps: usize, exog_future: &[&[f64]]) -> Vec<f64> {
         let p = self.opts.p as usize;
         let q = self.opts.q as usize;
         let d = self.opts.d as usize;
@@ -292,9 +420,40 @@ impl ArimaFit {
             }
         }
 
-        // Re-add intercept and integrate back to the original scale.
-        let w_forecasts: Vec<f64> = w_forecasts.iter().map(|v| v + self.intercept).collect();
-        integrate_from_last(&w_forecasts, &self.last_obs, d)
+        // Re-add the differenced-series mean if any. For an ARIMAX fit
+        // the inner ARIMA was centered (its own intercept is 0), so this
+        // is the exog-free branch.
+        let inner_intercept = if self.beta.is_empty() { self.intercept } else { 0.0 };
+        let w_forecasts: Vec<f64> = w_forecasts.iter().map(|v| v + inner_intercept).collect();
+        let mut out = integrate_from_last(&w_forecasts, &self.last_obs, d);
+
+        // ARIMAX: add β₀ + β·x_future per horizon.
+        if !self.beta.is_empty() {
+            for h in 0..steps {
+                let mut adj = self.intercept; // β₀
+                for (j, col) in exog_future.iter().enumerate() {
+                    adj += self.beta[j] * col[h];
+                }
+                out[h] += adj;
+            }
+        }
+        out
+    }
+
+    fn intervals_for(&self, mean: Vec<f64>, steps: usize, alpha: f64) -> ForecastResult {
+        let z = inv_phi(1.0 - alpha / 2.0);
+        let psi = psi_weights(&self.phi, &self.theta, steps);
+        let d = self.opts.d as usize;
+        let psi_star = integrate_psi(&psi, d);
+        let mut variance = Vec::with_capacity(steps);
+        let mut running = 0.0f64;
+        for h in 0..steps {
+            running += psi_star[h] * psi_star[h];
+            variance.push(self.sigma2 * running);
+        }
+        let lower: Vec<f64> = mean.iter().zip(&variance).map(|(m, v)| m - z * v.sqrt()).collect();
+        let upper: Vec<f64> = mean.iter().zip(&variance).map(|(m, v)| m + z * v.sqrt()).collect();
+        ForecastResult { mean, variance, lower, upper }
     }
 
     /// Multi-step forecasts with Gaussian prediction intervals.
@@ -311,34 +470,7 @@ impl ArimaFit {
     /// and statsmodels' default).
     pub fn forecast_with_intervals(&self, steps: usize, alpha: f64) -> ForecastResult {
         let mean = self.forecast(steps);
-        let z = inv_phi(1.0 - alpha / 2.0);
-
-        // ψ-weights of the stationary ARMA component (length = steps,
-        // ψ_0 = 1).
-        let psi = psi_weights(&self.phi, &self.theta, steps);
-        // For ARIMA with d > 0, integrate ψ d times to get ψ*.
-        let d = self.opts.d as usize;
-        let psi_star = integrate_psi(&psi, d);
-
-        // Var(h) = σ² · Σ_{j=0}^{h-1} ψ*_j².
-        let mut variance = Vec::with_capacity(steps);
-        let mut running = 0.0f64;
-        for h in 0..steps {
-            running += psi_star[h] * psi_star[h];
-            variance.push(self.sigma2 * running);
-        }
-        let lower: Vec<f64> = mean
-            .iter()
-            .zip(&variance)
-            .map(|(m, v)| m - z * v.sqrt())
-            .collect();
-        let upper: Vec<f64> = mean
-            .iter()
-            .zip(&variance)
-            .map(|(m, v)| m + z * v.sqrt())
-            .collect();
-
-        ForecastResult { mean, variance, lower, upper }
+        self.intervals_for(mean, steps, alpha)
     }
 }
 

@@ -348,6 +348,112 @@ fn forecast_intervals_widen_for_arima_d1() {
     }
 }
 
+// ----------------------------------------------------------------------
+// Exogenous regressors
+// ----------------------------------------------------------------------
+
+#[test]
+fn arimax_recovers_beta_when_arma_is_negligible() {
+    // y_t = 2 + 3·x1_t - 1.5·x2_t + small AR(1) error.
+    let n = 400;
+    let mut rng = Rng::new(0xE1);
+    let x1: Vec<f64> = (0..n).map(|i| (i as f64 * 0.1).sin()).collect();
+    let x2: Vec<f64> = (0..n).map(|i| (i as f64 * 0.05).cos()).collect();
+    let mut e = vec![0.0f64; n];
+    for t in 1..n {
+        e[t] = 0.3 * e[t - 1] + 0.1 * rng.normal();
+    }
+    let y: Vec<f64> = (0..n)
+        .map(|i| 2.0 + 3.0 * x1[i] - 1.5 * x2[i] + e[i])
+        .collect();
+    let exog: Vec<&[f64]> = vec![&x1, &x2];
+    let fit = super::arima_with_exog(&y, &exog, ArimaOpts::new(1, 0, 0)).unwrap();
+    assert!(
+        (fit.intercept - 2.0).abs() < 0.10,
+        "intercept = {}, expected 2.0",
+        fit.intercept
+    );
+    assert!(
+        (fit.beta[0] - 3.0).abs() < 0.05,
+        "beta[0] = {}, expected 3.0",
+        fit.beta[0]
+    );
+    assert!(
+        (fit.beta[1] - (-1.5)).abs() < 0.05,
+        "beta[1] = {}, expected -1.5",
+        fit.beta[1]
+    );
+    assert!(
+        (fit.phi[0] - 0.3).abs() < 0.15,
+        "phi = {}, expected ~0.3",
+        fit.phi[0]
+    );
+}
+
+#[test]
+fn arimax_no_exog_matches_arima() {
+    // Calling arima_with_exog with empty exog should match arima exactly.
+    let y = simulate_arma(300, &[0.5], &[0.2], 1.0, 0xE2);
+    let fit1 = arima(&y, ArimaOpts::new(1, 0, 1)).unwrap();
+    let fit2 = super::arima_with_exog(&y, &[], ArimaOpts::new(1, 0, 1)).unwrap();
+    for (a, b) in fit1.phi.iter().zip(fit2.phi.iter()) {
+        assert!((a - b).abs() < 1e-12, "phi differs: {a} vs {b}");
+    }
+    for (a, b) in fit1.theta.iter().zip(fit2.theta.iter()) {
+        assert!((a - b).abs() < 1e-12, "theta differs: {a} vs {b}");
+    }
+}
+
+#[test]
+fn arimax_rejects_mismatched_exog_length() {
+    let y = vec![1.0; 50];
+    let x_short = vec![1.0; 40];
+    let exog: Vec<&[f64]> = vec![&x_short];
+    let err = super::arima_with_exog(&y, &exog, ArimaOpts::new(1, 0, 0)).unwrap_err();
+    assert!(matches!(err, ArimaError::SeriesTooShort { .. }));
+}
+
+#[test]
+fn arimax_forecast_uses_future_exog() {
+    // Pure regression on a known linear x — forecast should follow.
+    let n = 300;
+    let mut rng = Rng::new(0xE3);
+    let x: Vec<f64> = (0..n).map(|i| i as f64 * 0.1).collect();
+    let y: Vec<f64> = (0..n).map(|i| 5.0 + 2.0 * x[i] + 0.3 * rng.normal()).collect();
+    let exog: Vec<&[f64]> = vec![&x];
+    let fit = super::arima_with_exog(&y, &exog, ArimaOpts::new(1, 0, 0)).unwrap();
+    let x_future: Vec<f64> = (n..n + 5).map(|i| i as f64 * 0.1).collect();
+    let f = fit.forecast_exog(&[&x_future]);
+    assert_eq!(f.len(), 5);
+    // forecast should be ≈ 5 + 2 * x_future_t (plus small AR effect).
+    for (h, fc) in f.iter().enumerate() {
+        let expected = 5.0 + 2.0 * x_future[h];
+        assert!(
+            (fc - expected).abs() < 1.0,
+            "h={h}: forecast {fc} vs expected {expected}"
+        );
+    }
+}
+
+#[test]
+fn arimax_forecast_intervals_have_correct_shape() {
+    let n = 200;
+    let mut rng = Rng::new(0xE4);
+    let x: Vec<f64> = (0..n).map(|i| (i as f64 * 0.2).sin()).collect();
+    let y: Vec<f64> = (0..n).map(|i| 1.0 + 4.0 * x[i] + rng.normal()).collect();
+    let exog: Vec<&[f64]> = vec![&x];
+    let fit = super::arima_with_exog(&y, &exog, ArimaOpts::new(1, 0, 0)).unwrap();
+    let x_future: Vec<f64> = (0..6).map(|i| ((n + i) as f64 * 0.2).sin()).collect();
+    let r = fit.forecast_intervals_exog(&[&x_future], 0.05);
+    assert_eq!(r.mean.len(), 6);
+    assert_eq!(r.lower.len(), 6);
+    assert_eq!(r.upper.len(), 6);
+    for h in 0..6 {
+        assert!(r.lower[h] <= r.mean[h]);
+        assert!(r.upper[h] >= r.mean[h]);
+    }
+}
+
 #[test]
 fn aic_bic_finite() {
     let y = simulate_arma(500, &[0.5], &[0.2], 1.0, 0xC1);

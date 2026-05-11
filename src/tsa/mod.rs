@@ -5,7 +5,7 @@ pub mod arima;
 pub mod holt_winters;
 pub mod seasonal;
 
-pub use arima::{arima, ArimaFit, ArimaOpts, ForecastResult};
+pub use arima::{arima, arima_with_exog, ArimaFit, ArimaOpts, ForecastResult};
 pub use holt_winters::{holt_winters, HoltWintersOpts};
 pub use seasonal::{
     seasonal_decompose, stl, DecomposeMode, Decomposition, Missing, SeasonalDecomposeOpts,
