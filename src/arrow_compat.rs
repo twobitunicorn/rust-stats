@@ -137,6 +137,42 @@ pub fn seasonal_decompose(
 // schema matches the input (same field names, same order). Validation is
 // performed up front for the whole batch, so a malformed column fails
 // fast before any compute starts.
+//
+// TODO(perf): cross-column SIMD for `loess_batch` via `pulp`.
+//
+// LOESS computes tricube weights from the integer x-grid only, so they
+// are shared across columns. With M=4 (AVX2 / Neon) or M=8 (AVX-512)
+// lanes, the per-point work — Σw·y, Σw·x·y, and the 2×2 normal-equation
+// solve — vectorises across columns. The shared scalars (Σw, Σw·x,
+// Σw·x²) are splatted; the per-column quantities ride in `S::f64s`.
+//
+// `pulp` is the right tool because its scalar fallback is just another
+// `Simd` impl (`type f64s = f64`), so one kernel written generically
+// over `S: Simd` compiles to both the scalar and SIMD paths — no
+// parallel implementations to keep in sync. It's already in our dep
+// graph transitively through faer. Sketch:
+//
+//   use pulp::{Arch, Simd, WithSimd};
+//   struct LoessBatch<'a> { cols: &'a [&'a [f64]], span: f64,
+//                           out: &'a mut [Vec<f64>] }
+//   impl<'a> WithSimd for LoessBatch<'a> {
+//       type Output = ();
+//       #[inline(always)]
+//       fn with_simd<S: Simd>(self, simd: S) {
+//           // For each output i:
+//           //   compute weights (scalar, shared)
+//           //   for each column-chunk c in cols.chunks(lanes::<S>()):
+//           //     accumulate Σw·y, Σw·x·y as S::f64s
+//           //     solve 2×2 per lane, store back
+//       }
+//   }
+//   Arch::new().dispatch(LoessBatch { ... });
+//
+// Expected gain: ~3× over rayon-only on AVX2/Neon, ~6× on AVX-512, on
+// top of the current numbers. Worth doing the next time a multi-series
+// workload is the bottleneck; not worth doing speculatively. The
+// `loess_batch_matches_scalar_column_by_column` test in
+// tests/arrow_compat.rs already guards against drift.
 
 /// Output of a batched seasonal-trend decomposition. Each component is a
 /// `RecordBatch` with the same schema as the input — column `j` of `trend`
