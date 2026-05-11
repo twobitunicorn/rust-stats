@@ -633,6 +633,99 @@ fn sarima_forecast_intervals() {
 
 // ----------------------------------------------------------------------
 
+// ----------------------------------------------------------------------
+// Kalman MLE estimation
+// ----------------------------------------------------------------------
+
+#[test]
+fn mle_recovers_ar1_truth() {
+    let phi_true = 0.6;
+    let y = simulate_arma(2_000, &[phi_true], &[], 1.0, 0x101);
+    let mut opts = ArimaOpts::new(1, 0, 0);
+    opts.method = super::ArimaMethod::Mle;
+    let fit = arima(&y, opts).unwrap();
+    assert!(
+        (fit.phi[0] - phi_true).abs() < 0.05,
+        "MLE phi = {} vs truth {phi_true}",
+        fit.phi[0]
+    );
+}
+
+#[test]
+fn mle_recovers_ma1_truth() {
+    let theta_true = 0.4;
+    let y = simulate_arma(2_000, &[], &[theta_true], 1.0, 0x102);
+    let mut opts = ArimaOpts::new(0, 0, 1);
+    opts.method = super::ArimaMethod::Mle;
+    let fit = arima(&y, opts).unwrap();
+    assert!(
+        (fit.theta[0] - theta_true).abs() < 0.10,
+        "MLE theta = {} vs truth {theta_true}",
+        fit.theta[0]
+    );
+}
+
+#[test]
+fn css_ml_recovers_arma_truth() {
+    let phi_true = 0.5;
+    let theta_true = 0.3;
+    let y = simulate_arma(2_000, &[phi_true], &[theta_true], 1.0, 0x103);
+    let mut opts = ArimaOpts::new(1, 0, 1);
+    opts.method = super::ArimaMethod::CssMle;
+    let fit = arima(&y, opts).unwrap();
+    assert!(
+        (fit.phi[0] - phi_true).abs() < 0.10,
+        "CSS-ML phi = {}",
+        fit.phi[0]
+    );
+    assert!(
+        (fit.theta[0] - theta_true).abs() < 0.10,
+        "CSS-ML theta = {}",
+        fit.theta[0]
+    );
+}
+
+#[test]
+fn mle_and_css_agree_on_long_series() {
+    // Asymptotic equivalence: with enough data, the two estimators
+    // should land within a small distance of each other.
+    let y = simulate_arma(3_000, &[0.6], &[0.3], 1.0, 0x104);
+    let css_fit = arima(&y, ArimaOpts::new(1, 0, 1)).unwrap();
+    let mut mle_opts = ArimaOpts::new(1, 0, 1);
+    mle_opts.method = super::ArimaMethod::Mle;
+    let mle_fit = arima(&y, mle_opts).unwrap();
+    assert!(
+        (css_fit.phi[0] - mle_fit.phi[0]).abs() < 0.05,
+        "CSS φ = {} vs MLE φ = {}",
+        css_fit.phi[0],
+        mle_fit.phi[0]
+    );
+    assert!(
+        (css_fit.theta[0] - mle_fit.theta[0]).abs() < 0.05,
+        "CSS θ = {} vs MLE θ = {}",
+        css_fit.theta[0],
+        mle_fit.theta[0]
+    );
+}
+
+#[test]
+fn mle_forecast_runs() {
+    let y = simulate_arma(500, &[0.5], &[], 1.0, 0x105);
+    let mut opts = ArimaOpts::new(1, 0, 0);
+    opts.method = super::ArimaMethod::Mle;
+    let fit = arima(&y, opts).unwrap();
+    let f = fit.forecast(10);
+    assert_eq!(f.len(), 10);
+    for v in &f {
+        assert!(v.is_finite());
+    }
+    let r = fit.forecast_with_intervals(10, 0.05);
+    assert_eq!(r.lower.len(), 10);
+    assert_eq!(r.upper.len(), 10);
+}
+
+// ----------------------------------------------------------------------
+
 #[test]
 fn aic_bic_finite() {
     let y = simulate_arma(500, &[0.5], &[0.2], 1.0, 0xC1);

@@ -25,9 +25,27 @@
 
 use crate::error::ArimaError;
 
+mod kalman;
 mod nelder_mead;
 mod ols;
 mod transform;
+
+/// Estimation method.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArimaMethod {
+    /// Conditional Sum of Squares (default). Fast and robust; uses the
+    /// CSS recursion as the objective.
+    Css,
+    /// Exact Gaussian MLE via Kalman filter. Asymptotically equivalent
+    /// to CSS but slightly more efficient at finite n; the cost is one
+    /// state-space build + filter run per likelihood evaluation. Matches
+    /// the default in `statsmodels.tsa.statespace.SARIMAX`.
+    Mle,
+    /// CSS for initial values, then MLE refinement (R's
+    /// `arima(method = "CSS-ML")` default). Combines CSS's robustness
+    /// with MLE's accuracy.
+    CssMle,
+}
 
 /// Order and configuration for [`arima`].
 #[derive(Debug, Clone, Copy)]
@@ -52,10 +70,13 @@ pub struct ArimaOpts {
     /// When `d > 0` (or `D > 0`) this is the drift of the integrated
     /// process.
     pub include_constant: bool,
+    /// Estimation method.
+    pub method: ArimaMethod,
 }
 
 impl ArimaOpts {
-    /// Build a non-seasonal ARIMA(p, d, q).
+    /// Build a non-seasonal ARIMA(p, d, q) with the default CSS
+    /// estimation method.
     pub fn new(p: u32, d: u32, q: u32) -> Self {
         Self {
             p,
@@ -66,6 +87,7 @@ impl ArimaOpts {
             seasonal_q: 0,
             seasonal_period: 0,
             include_constant: true,
+            method: ArimaMethod::Css,
         }
     }
 
@@ -80,6 +102,7 @@ impl ArimaOpts {
             seasonal_q: big_q,
             seasonal_period: m,
             include_constant: true,
+            method: ArimaMethod::Css,
         }
     }
 }
@@ -317,28 +340,56 @@ fn arima_no_exog(y: &[f64], opts: ArimaOpts) -> Result<ArimaFit, ArimaError> {
         idx += 1;
     }
 
-    // 5. CSS minimisation over the unconstrained space.
+    // 5. Optimisation. The unconstrained parameter vector is the same
+    //    for both objectives — only the objective itself changes.
     let css_obj = |x: &[f64]| -> f64 {
         let (phi, phi_s, theta, theta_s) = unpack_full(x, p, big_p, q, big_q);
         let total_ar = convolve_ar(&phi, &phi_s, mm);
         let total_ma = convolve_ma(&theta, &theta_s, mm);
         css_sse(&w_centered, &total_ar, &total_ma)
     };
+    let mle_obj = |x: &[f64]| -> f64 {
+        let (phi, phi_s, theta, theta_s) = unpack_full(x, p, big_p, q, big_q);
+        let total_ar = convolve_ar(&phi, &phi_s, mm);
+        let total_ma = convolve_ma(&theta, &theta_s, mm);
+        kalman::concentrated_neg_loglik(&w_centered, &total_ar, &total_ma)
+    };
     let max_iter = 2_000 + 200 * pn;
-    let (x_star, _f_star, converged) =
-        nelder_mead::minimize(&x0, &css_obj, max_iter, 1e-8);
+    let (x_star, _f_star, converged) = match opts.method {
+        ArimaMethod::Css => nelder_mead::minimize(&x0, &css_obj, max_iter, 1e-8),
+        ArimaMethod::Mle => nelder_mead::minimize(&x0, &mle_obj, max_iter, 1e-8),
+        ArimaMethod::CssMle => {
+            // CSS first, then MLE refinement from CSS solution.
+            let (x_css, _, css_ok) =
+                nelder_mead::minimize(&x0, &css_obj, max_iter, 1e-8);
+            if !css_ok {
+                return Err(ArimaError::OptimizationFailed { iters: max_iter });
+            }
+            nelder_mead::minimize(&x_css, &mle_obj, max_iter, 1e-8)
+        }
+    };
     if !converged {
         return Err(ArimaError::OptimizationFailed { iters: max_iter });
     }
     let (phi, phi_s, theta, theta_s) = unpack_full(&x_star, p, big_p, q, big_q);
 
     // 6. Residuals/fitted on the centered, fully-differenced series.
+    //    For CSS we use the SSR over the m_eff effective observations;
+    //    for MLE / CSS-ML we use the Kalman-concentrated σ̂² (uses all
+    //    observations via the exact initial covariance).
     let total_ar = convolve_ar(&phi, &phi_s, mm);
     let total_ma = convolve_ma(&theta, &theta_s, mm);
     let eps = compute_eps(&w_centered, &total_ar, &total_ma);
     let m_eff = n_w.saturating_sub(recursion_order);
-    let sse: f64 = eps.iter().skip(recursion_order).map(|e| e * e).sum();
-    let sigma2 = if m_eff > 0 { sse / m_eff as f64 } else { f64::NAN };
+    let sigma2 = match opts.method {
+        ArimaMethod::Css => {
+            let sse: f64 = eps.iter().skip(recursion_order).map(|e| e * e).sum();
+            if m_eff > 0 { sse / m_eff as f64 } else { f64::NAN }
+        }
+        ArimaMethod::Mle | ArimaMethod::CssMle => {
+            kalman::concentrated_sigma2(&w_centered, &total_ar, &total_ma)
+        }
+    };
 
     // 7. Lift fitted / residuals back to original scale.
     let fitted_w: Vec<f64> = (0..n_w).map(|t| w_centered[t] - eps[t] + intercept).collect();
