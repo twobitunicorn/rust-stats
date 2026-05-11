@@ -18,7 +18,10 @@ pub use error::{
     ArimaError, BoxCoxError, HoltWintersError, LoessError, SeasonalDecomposeError, StlError,
 };
 pub use smoothing::{loess, loess_at};
-pub use transforms::{box_cox, center, min_max_scale, z_score};
+pub use transforms::{
+    box_cox, box_cox_lambda_guerrero, box_cox_lambda_mle, center, inv_box_cox, min_max_scale,
+    z_score,
+};
 pub use tsa::{
     arima, arima_with_exog, holt_winters, seasonal_decompose, stl, ArimaFit, ArimaMethod,
     ArimaOpts, DecomposeMode, Decomposition, ForecastResult, HoltWintersOpts, Missing,

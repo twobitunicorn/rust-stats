@@ -21,7 +21,10 @@
 
 use approx::assert_relative_eq;
 use rust_stats::error::BoxCoxError;
-use rust_stats::{box_cox, center, min_max_scale, z_score};
+use rust_stats::{
+    box_cox, box_cox_lambda_guerrero, box_cox_lambda_mle, center, inv_box_cox, min_max_scale,
+    z_score,
+};
 
 /// numpy.testing.assert_almost_equal semantics: tolerance = 1.5 * 10^-decimal.
 fn approx_eq(a: f64, b: f64, decimal: i32, ctx: &str) {
@@ -301,4 +304,136 @@ fn box_cox_nan_propagates() {
 fn box_cox_limit_lambda_to_zero_matches_log() {
     let out_small = box_cox(&[2.0], 1e-6).unwrap();
     approx_eq(out_small[0], 2f64.ln(), 5, "bc(2, 1e-6) ≈ ln 2");
+}
+
+// ============================================================================
+// inv_box_cox  —  scipy.special.inv_boxcox
+// ============================================================================
+
+/// scipy: `inv_boxcox([0, 1, 2], 0)` → `[1, e, e²]` (exp).
+#[test]
+fn inv_box_cox_lambda_zero_matches_scipy() {
+    let out = inv_box_cox(&[0.0, 1.0, 2.0], 0.0).unwrap();
+    let expected = [1.0, std::f64::consts::E, std::f64::consts::E.powi(2)];
+    for (i, (&a, &e)) in out.iter().zip(expected.iter()).enumerate() {
+        approx_eq(a, e, 12, &format!("inv_bc0[{i}]"));
+    }
+}
+
+/// Forward/inverse roundtrip at several λ — should recover the input
+/// to machine precision. scipy convention: `inv_boxcox(boxcox(x, λ), λ) == x`.
+#[test]
+fn inv_box_cox_roundtrips_match_scipy() {
+    let x = vec![1.0, 2.0, 4.0, 8.0, 16.0];
+    for lmbda in [0.0_f64, 0.5, 1.0, 2.0, -1.0] {
+        let y = box_cox(&x, lmbda).unwrap();
+        let back = inv_box_cox(&y, lmbda).unwrap();
+        for (i, (a, b)) in x.iter().zip(back.iter()).enumerate() {
+            assert_relative_eq!(a, b, max_relative = 1e-10);
+            let _ = i;
+        }
+    }
+}
+
+/// scipy raises on out-of-domain inputs (`1 + λy ≤ 0`). We surface a
+/// typed error.
+#[test]
+fn inv_box_cox_rejects_invalid_like_scipy() {
+    // λ = 1, y = -1 → 1 + 1·(-1) = 0 → not strictly positive → error.
+    let err = inv_box_cox(&[-1.0], 1.0).unwrap_err();
+    assert!(matches!(err, BoxCoxError::NonInvertible { .. }));
+}
+
+// ============================================================================
+// box_cox_lambda_mle  —  scipy.stats.boxcox (no lmbda) /
+//                       R MASS::boxcox / forecast::BoxCox.lambda(method="loglik")
+// ============================================================================
+
+/// On strictly-positive ~normal data, MLE λ should be close to 1
+/// (transform is near-identity). Spot-check on a synthetic series.
+#[test]
+fn box_cox_mle_near_one_on_normal_like_data() {
+    let y: Vec<f64> = (0..500)
+        .map(|i| {
+            let t = i as f64 * 0.13;
+            10.0 + (t.sin() + (t * 0.4).cos() * 0.5) * 0.5
+        })
+        .collect();
+    let lmbda = box_cox_lambda_mle(&y).unwrap();
+    assert!(
+        (lmbda - 1.0).abs() < 0.5,
+        "expected λ ≈ 1 for normal-ish data, got {lmbda}"
+    );
+}
+
+/// On strictly-positive lognormal data, MLE λ should be close to 0
+/// (log transform). This is the canonical scipy / R test case.
+#[test]
+fn box_cox_mle_near_zero_on_lognormal_data() {
+    let y: Vec<f64> = (0..500)
+        .map(|i| {
+            let t = i as f64 * 0.13;
+            (t.sin() + (t * 0.4).cos() * 0.5).exp() * 10.0
+        })
+        .collect();
+    let lmbda = box_cox_lambda_mle(&y).unwrap();
+    assert!(
+        lmbda.abs() < 0.5,
+        "expected λ ≈ 0 for lognormal data, got {lmbda}"
+    );
+}
+
+// ============================================================================
+// box_cox_lambda_guerrero  —  R forecast::BoxCox.lambda(method="guerrero")
+// ============================================================================
+
+/// Guerrero on a multiplicative-variance seasonal series should return
+/// a small λ (log-ish transform). Matches the R `forecast` package's
+/// default behaviour on series whose within-cycle σ grows with the
+/// within-cycle level.
+#[test]
+fn guerrero_small_lambda_on_multiplicative_variance() {
+    let period = 12;
+    let n_cycles = 30;
+    let mut y = Vec::with_capacity(period * n_cycles);
+    for c in 0..n_cycles {
+        let level = 10.0 + 0.5 * c as f64;
+        for i in 0..period {
+            let phase = 2.0 * std::f64::consts::PI * i as f64 / period as f64;
+            y.push(level * (1.0 + 0.2 * phase.sin()));
+        }
+    }
+    let lmbda = box_cox_lambda_guerrero(&y, period).unwrap();
+    assert!(
+        lmbda < 0.5,
+        "expected small λ for multiplicative-variance series, got {lmbda}"
+    );
+}
+
+/// Guerrero on a constant-variance series should return λ ≈ 1 (no
+/// transform).
+#[test]
+fn guerrero_returns_lambda_near_one_for_constant_variance() {
+    let period = 12;
+    let n_cycles = 30;
+    let mut y = Vec::with_capacity(period * n_cycles);
+    for c in 0..n_cycles {
+        for i in 0..period {
+            let phase = 2.0 * std::f64::consts::PI * i as f64 / period as f64;
+            y.push(10.0 + 0.5 * c as f64 + phase.sin());
+        }
+    }
+    let lmbda = box_cox_lambda_guerrero(&y, period).unwrap();
+    assert!(
+        (lmbda - 1.0).abs() < 0.5,
+        "expected λ ≈ 1 for additive-variance series, got {lmbda}"
+    );
+}
+
+#[test]
+fn guerrero_rejects_short_series_like_r() {
+    // Period 12 but only one cycle — can't compute CV across cycles.
+    let y = vec![1.0; 12];
+    let err = box_cox_lambda_guerrero(&y, 12).unwrap_err();
+    assert!(matches!(err, BoxCoxError::TooFewObservations { .. }));
 }

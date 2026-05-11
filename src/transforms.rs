@@ -49,6 +49,202 @@ pub fn min_max_scale(y: &[f64]) -> Vec<f64> {
     pulp_impl::min_max_scale(y)
 }
 
+/// Inverse Box-Cox: given `y = box_cox(x, λ)`, recover `x`.
+///
+/// ```text
+/// x = (1 + λ·y)^(1/λ)   when λ ≠ 0
+/// x = exp(y)            when λ = 0
+/// ```
+///
+/// `NaN` entries propagate. Returns [`BoxCoxError::NonInvertible`] when
+/// any finite `y` violates `1 + λ·y > 0` (the transform clamps to a
+/// half-line that excludes those values).
+pub fn inv_box_cox(y: &[f64], lmbda: f64) -> Result<Vec<f64>, BoxCoxError> {
+    if lmbda == 0.0 {
+        return Ok(y.iter().map(|&v| v.exp()).collect());
+    }
+    let inv = 1.0 / lmbda;
+    let mut out = Vec::with_capacity(y.len());
+    for &v in y {
+        if v.is_nan() {
+            out.push(f64::NAN);
+            continue;
+        }
+        let z = 1.0 + lmbda * v;
+        if !v.is_infinite() && z <= 0.0 {
+            return Err(BoxCoxError::NonInvertible { value: v, lambda: lmbda });
+        }
+        out.push(z.powf(inv));
+    }
+    Ok(out)
+}
+
+/// Pick λ for `box_cox` by maximum likelihood under the Gaussian model
+/// for the transformed series (the standard `scipy.stats.boxcox`
+/// objective):
+///
+/// ```text
+/// L(λ) = -n/2 · ln σ²(λ) + (λ − 1) · Σ ln x_i,
+/// ```
+///
+/// where `σ²(λ)` is the variance of the transformed series. We minimise
+/// `−L` over `λ ∈ [-2, 2]` by golden-section search. Requires every
+/// finite input to be strictly positive.
+pub fn box_cox_lambda_mle(y: &[f64]) -> Result<f64, BoxCoxError> {
+    let mut min_finite = f64::INFINITY;
+    let mut log_sum = 0.0;
+    let mut n_finite = 0usize;
+    for &v in y {
+        if v.is_finite() {
+            if v < min_finite {
+                min_finite = v;
+            }
+            log_sum += v.ln();
+            n_finite += 1;
+        }
+    }
+    if min_finite.is_finite() && !(min_finite > 0.0) {
+        return Err(BoxCoxError::NonPositive { min: min_finite });
+    }
+    if n_finite < 2 {
+        return Err(BoxCoxError::TooFewObservations {
+            n: n_finite,
+            min: 2,
+        });
+    }
+    let nf = n_finite as f64;
+    let neg_loglik = |lmbda: f64| -> f64 {
+        // Transformed values over the finite entries.
+        let mut sum = 0.0;
+        let mut sum_sq = 0.0;
+        for &v in y {
+            if !v.is_finite() {
+                continue;
+            }
+            let t = if lmbda == 0.0 {
+                v.ln()
+            } else {
+                (v.powf(lmbda) - 1.0) / lmbda
+            };
+            sum += t;
+            sum_sq += t * t;
+        }
+        let mean = sum / nf;
+        let var = (sum_sq / nf) - mean * mean;
+        if var <= 0.0 {
+            return f64::INFINITY;
+        }
+        0.5 * nf * var.ln() - (lmbda - 1.0) * log_sum
+    };
+    Ok(golden_section_minimize(&neg_loglik, -2.0, 2.0, 1e-8, 200))
+}
+
+/// Pick λ for `box_cox` by Guerrero's (1993) criterion. Splits the
+/// series into consecutive blocks of length `period`; for each block
+/// computes the ratio `σ_b / μ_b^(1 − λ)`; returns the λ that minimises
+/// the coefficient of variation of those ratios. Matches the default
+/// behaviour of R's `forecast::BoxCox.lambda(x, method = "guerrero")`.
+///
+/// Typically used to stabilise seasonal variance: when λ is at its
+/// optimum, the within-cycle spread is proportional to the within-cycle
+/// mean raised to `1 − λ`, and the ratios stop varying across cycles.
+pub fn box_cox_lambda_guerrero(y: &[f64], period: usize) -> Result<f64, BoxCoxError> {
+    if period < 2 {
+        return Err(BoxCoxError::InvalidPeriod(period));
+    }
+    let n_blocks = y.len() / period;
+    if n_blocks < 2 {
+        return Err(BoxCoxError::TooFewObservations {
+            n: y.len(),
+            min: 2 * period,
+        });
+    }
+    let mut min_finite = f64::INFINITY;
+    for &v in &y[..n_blocks * period] {
+        if v.is_finite() && v < min_finite {
+            min_finite = v;
+        }
+    }
+    if min_finite.is_finite() && !(min_finite > 0.0) {
+        return Err(BoxCoxError::NonPositive { min: min_finite });
+    }
+    // Pre-compute per-block means and sample standard deviations.
+    let mut means = Vec::with_capacity(n_blocks);
+    let mut sds = Vec::with_capacity(n_blocks);
+    for b in 0..n_blocks {
+        let block = &y[b * period..(b + 1) * period];
+        let mean: f64 = block.iter().sum::<f64>() / period as f64;
+        let var: f64 = block
+            .iter()
+            .map(|v| (v - mean).powi(2))
+            .sum::<f64>()
+            / (period as f64 - 1.0);
+        means.push(mean);
+        sds.push(var.sqrt());
+    }
+    let n_b = n_blocks as f64;
+    let criterion = |lmbda: f64| -> f64 {
+        let mut ratios = Vec::with_capacity(n_blocks);
+        for b in 0..n_blocks {
+            let denom = means[b].powf(1.0 - lmbda);
+            if denom <= 0.0 || !denom.is_finite() {
+                return f64::INFINITY;
+            }
+            ratios.push(sds[b] / denom);
+        }
+        let mean_r: f64 = ratios.iter().sum::<f64>() / n_b;
+        if mean_r == 0.0 {
+            return f64::INFINITY;
+        }
+        let var_r: f64 = ratios
+            .iter()
+            .map(|v| (v - mean_r).powi(2))
+            .sum::<f64>()
+            / (n_b - 1.0);
+        var_r.sqrt() / mean_r.abs()
+    };
+    Ok(golden_section_minimize(&criterion, -1.0, 2.0, 1e-8, 200))
+}
+
+/// Golden-section minimum search on a unimodal `f` over `[a, b]`.
+fn golden_section_minimize<F: Fn(f64) -> f64>(
+    f: &F,
+    mut a: f64,
+    mut b: f64,
+    tol: f64,
+    max_iter: usize,
+) -> f64 {
+    // Resphi = 2 - φ = (3 - √5) / 2.
+    const RESPHI: f64 = 0.381_966_011_250_105_2;
+    let mut x1 = a + RESPHI * (b - a);
+    let mut x2 = b - RESPHI * (b - a);
+    let mut f1 = f(x1);
+    let mut f2 = f(x2);
+    for _ in 0..max_iter {
+        if (b - a).abs() < tol {
+            break;
+        }
+        if f1 < f2 {
+            b = x2;
+            x2 = x1;
+            f2 = f1;
+            x1 = a + RESPHI * (b - a);
+            f1 = f(x1);
+        } else {
+            a = x1;
+            x1 = x2;
+            f1 = f2;
+            x2 = b - RESPHI * (b - a);
+            f2 = f(x2);
+        }
+    }
+    if f1 < f2 {
+        x1
+    } else {
+        x2
+    }
+}
+
 /// Box-Cox power transformation with a fixed `lmbda`:
 ///
 /// ```text
@@ -434,6 +630,150 @@ mod tests {
         assert_eq!(out[0], 0.0);
         assert!(out[1].is_nan());
         assert_relative_eq!(out[2], 7.5);
+    }
+
+    // --- inverse Box-Cox ---
+
+    #[test]
+    fn inv_box_cox_lambda_zero_is_exp() {
+        let out = inv_box_cox(&[0.0, 1.0, 2.0], 0.0).unwrap();
+        assert_relative_eq!(out[0], 1.0, max_relative = 1e-12);
+        assert_relative_eq!(out[1], std::f64::consts::E, max_relative = 1e-12);
+        assert_relative_eq!(out[2], std::f64::consts::E * std::f64::consts::E, max_relative = 1e-12);
+    }
+
+    #[test]
+    fn inv_box_cox_lambda_two_roundtrips() {
+        let x = vec![1.0, 2.0, 3.5, 7.25];
+        let y = box_cox(&x, 2.0).unwrap();
+        let back = inv_box_cox(&y, 2.0).unwrap();
+        for (a, b) in x.iter().zip(back.iter()) {
+            assert_relative_eq!(a, b, max_relative = 1e-12);
+        }
+    }
+
+    #[test]
+    fn inv_box_cox_lambda_half_roundtrips() {
+        let x = vec![1.0, 2.0, 4.0, 8.0, 16.0];
+        let y = box_cox(&x, 0.5).unwrap();
+        let back = inv_box_cox(&y, 0.5).unwrap();
+        for (a, b) in x.iter().zip(back.iter()) {
+            assert_relative_eq!(a, b, max_relative = 1e-12);
+        }
+    }
+
+    #[test]
+    fn inv_box_cox_propagates_nan() {
+        let out = inv_box_cox(&[0.0, f64::NAN, 1.0], 0.0).unwrap();
+        assert_relative_eq!(out[0], 1.0, max_relative = 1e-12);
+        assert!(out[1].is_nan());
+        assert_relative_eq!(out[2], std::f64::consts::E, max_relative = 1e-12);
+    }
+
+    #[test]
+    fn inv_box_cox_rejects_out_of_domain() {
+        // λ = 1, y = -2 → 1 + 1·(-2) = -1 ≤ 0 → error.
+        let err = inv_box_cox(&[-2.0], 1.0).unwrap_err();
+        assert!(matches!(err, BoxCoxError::NonInvertible { .. }));
+    }
+
+    // --- λ estimators ---
+
+    #[test]
+    fn mle_returns_lambda_near_one_for_normal_data() {
+        // A near-Gaussian, strictly positive series: μ=10, σ=1.
+        // λ ≈ 1 means "no transform needed" — the data is already normal.
+        let y: Vec<f64> = (0..200)
+            .map(|i| {
+                let t = (i as f64) * 0.31;
+                10.0 + t.sin() + (t * 1.7).cos() * 0.5 + (t * 0.3).sin() * 0.3
+            })
+            .collect();
+        let lmbda = box_cox_lambda_mle(&y).unwrap();
+        assert!(
+            (lmbda - 1.0).abs() < 0.5,
+            "expected λ near 1 for ~normal data, got {lmbda}"
+        );
+    }
+
+    #[test]
+    fn mle_returns_lambda_near_zero_for_lognormal_data() {
+        // exp(x) where x is near-normal — Box-Cox MLE should pick λ ≈ 0
+        // (log transform restores normality).
+        let y: Vec<f64> = (0..200)
+            .map(|i| {
+                let t = (i as f64) * 0.31;
+                (t.sin() + (t * 1.7).cos() * 0.5).exp() * 10.0
+            })
+            .collect();
+        let lmbda = box_cox_lambda_mle(&y).unwrap();
+        assert!(
+            lmbda.abs() < 0.5,
+            "expected λ near 0 for lognormal data, got {lmbda}"
+        );
+    }
+
+    #[test]
+    fn mle_rejects_non_positive() {
+        let err = box_cox_lambda_mle(&[1.0, -2.0, 3.0]).unwrap_err();
+        assert!(matches!(err, BoxCoxError::NonPositive { .. }));
+    }
+
+    #[test]
+    fn guerrero_rejects_invalid_period() {
+        let y = vec![1.0; 100];
+        let err = box_cox_lambda_guerrero(&y, 1).unwrap_err();
+        assert!(matches!(err, BoxCoxError::InvalidPeriod(1)));
+    }
+
+    #[test]
+    fn guerrero_picks_log_for_multiplicative_seasonal_variance() {
+        // Series where the cycle-to-cycle standard deviation grows
+        // proportionally to the cycle mean (classic "multiplicative
+        // seasonality"). Guerrero should recommend λ ≈ 0 (log) to
+        // stabilise that.
+        let period = 12;
+        let n_cycles = 30;
+        let mut y = Vec::with_capacity(period * n_cycles);
+        for c in 0..n_cycles {
+            let level = 10.0 + 0.5 * c as f64;
+            for i in 0..period {
+                let phase = 2.0 * std::f64::consts::PI * i as f64 / period as f64;
+                let seasonal = (phase).sin();
+                // σ ∝ μ ⇒ noise scales with level; classic
+                // multiplicative-variance case.
+                y.push(level * (1.0 + 0.2 * seasonal));
+            }
+        }
+        let lmbda = box_cox_lambda_guerrero(&y, period).unwrap();
+        // Guerrero should return small λ — close to 0 or even slightly
+        // negative — indicating a log-ish transform.
+        assert!(
+            lmbda < 0.5,
+            "expected small λ for multiplicative-variance series, got {lmbda}"
+        );
+    }
+
+    #[test]
+    fn guerrero_picks_one_for_additive_seasonal_variance() {
+        // Series with constant-variance noise on top of a stable level
+        // — Guerrero should leave it alone (λ ≈ 1).
+        let period = 12;
+        let n_cycles = 30;
+        let mut y = Vec::with_capacity(period * n_cycles);
+        for c in 0..n_cycles {
+            for i in 0..period {
+                let phase = 2.0 * std::f64::consts::PI * i as f64 / period as f64;
+                let seasonal = (phase).sin();
+                // σ is constant across cycles ⇒ λ = 1 is optimal.
+                y.push(10.0 + 0.5 * c as f64 + seasonal);
+            }
+        }
+        let lmbda = box_cox_lambda_guerrero(&y, period).unwrap();
+        assert!(
+            (lmbda - 1.0).abs() < 0.5,
+            "expected λ near 1 for additive-variance series, got {lmbda}"
+        );
     }
 
     // --- Pulp vs. scalar parity ---

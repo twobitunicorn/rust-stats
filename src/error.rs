@@ -52,6 +52,12 @@ pub enum SeasonalDecomposeError {
 pub enum BoxCoxError {
     #[error("Box-Cox requires strictly positive values; got minimum {min}")]
     NonPositive { min: f64 },
+    #[error("inverse Box-Cox is undefined: 1 + λ·y must be > 0; got y={value}, λ={lambda}")]
+    NonInvertible { value: f64, lambda: f64 },
+    #[error("Box-Cox λ estimation needs at least {min} observations; got {n}")]
+    TooFewObservations { n: usize, min: usize },
+    #[error("Guerrero λ estimation needs period >= 2 and a full cycle; got period={0}")]
+    InvalidPeriod(usize),
 }
 
 #[derive(Debug, Error, PartialEq)]
