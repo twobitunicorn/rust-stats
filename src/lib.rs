@@ -14,10 +14,12 @@ pub mod arrow_compat;
 #[cfg(feature = "polars")]
 pub mod polars_compat;
 
-pub use error::{BoxCoxError, HoltWintersError, LoessError, SeasonalDecomposeError, StlError};
+pub use error::{
+    ArimaError, BoxCoxError, HoltWintersError, LoessError, SeasonalDecomposeError, StlError,
+};
 pub use smoothing::{loess, loess_at};
 pub use transforms::{box_cox, center, min_max_scale, z_score};
 pub use tsa::{
-    holt_winters, seasonal_decompose, stl, DecomposeMode, Decomposition, HoltWintersOpts, Missing,
-    SeasonalDecomposeOpts, SeasonalWindow, StlOpts,
+    arima, holt_winters, seasonal_decompose, stl, ArimaFit, ArimaOpts, DecomposeMode,
+    Decomposition, HoltWintersOpts, Missing, SeasonalDecomposeOpts, SeasonalWindow, StlOpts,
 };

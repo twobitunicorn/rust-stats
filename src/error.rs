@@ -55,6 +55,26 @@ pub enum BoxCoxError {
 }
 
 #[derive(Debug, Error, PartialEq)]
+pub enum ArimaError {
+    #[error("invalid order: p={p}, d={d}, q={q}; need p,q in [0, 10] and d in [0, 2]")]
+    InvalidOrder { p: u32, d: u32, q: u32 },
+    #[error("series too short: need >= {min} observations for ARIMA({p},{d},{q}), got {n}")]
+    SeriesTooShort {
+        n: usize,
+        min: usize,
+        p: u32,
+        d: u32,
+        q: u32,
+    },
+    #[error("input contains non-finite values")]
+    NonFinite,
+    #[error("Nelder-Mead failed to converge within {iters} iterations")]
+    OptimizationFailed { iters: usize },
+    #[error("starting-value regression failed: singular normal-equations matrix")]
+    Singular,
+}
+
+#[derive(Debug, Error, PartialEq)]
 pub enum HoltWintersError {
     #[error("alpha must be in [0, 1]; got {0}")]
     InvalidAlpha(f64),
