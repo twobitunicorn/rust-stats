@@ -412,6 +412,57 @@ cargo run --release --example bench_auto_arima
 python3 tests/golden/bench_auto_arima_pmdarima.py
 ```
 
+#### Scaling: ARIMA(1, 1, 1) from n=10⁴ to n=10⁷
+
+How does each implementation scale as the series gets longer? One
+fit per cell, no warmup, ARIMA(1, 1, 1) with `φ = 0.5`, `θ = -0.3`,
+drift `= 0.1`.
+
+| n | rust CSS | rust CSS-ML | rust MLE | R arima | statsmodels |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 10 000      |   **0.010 s** | 0.072 s |  0.043 s |   0.038 s |   0.250 s |
+| 100 000     |   **0.069 s** | 0.518 s |  0.422 s |   0.143 s |   2.080 s |
+| 1 000 000   |   **0.710 s** | 6.046 s |  5.385 s |   1.394 s |  20.355 s |
+| 10 000 000  |   **9.819 s** |    —    |     —    |  13.777 s | 204.011 s |
+
+Throughput, in µs per data point (constant means linear scaling):
+
+| n | rust CSS | rust CSS-ML | rust MLE | R arima | statsmodels |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 10 000      | 1.05 |  7.17  |  4.32 |  3.85 | 25.04 |
+| 100 000     | 0.69 |  5.18  |  4.22 |  1.43 | 20.80 |
+| 1 000 000   | 0.71 |  6.05  |  5.39 |  1.39 | 20.35 |
+| 10 000 000  | 0.98 |   —    |   —   |  1.38 | 20.40 |
+
+Everything is **O(n)** as expected — Kalman filters and CSS recursions
+all touch each point a constant number of times. What varies is the
+constant:
+
+- **rust-stats CSS** wins overall at ~0.7-1.0 µs/pt — it skips the
+  Kalman filter entirely.
+- **R `stats::arima`** is the standout at ~1.4 µs/pt for the Kalman
+  MLE objective: mature Fortran/C, decades of tuning. We lose to R by
+  ~4× on the like-for-like CSS-ML / MLE columns.
+- **statsmodels SARIMAX** is ~15× slower than R per point. The
+  hot-path Kalman filter is Cython, but each L-BFGS optim step pays
+  Python wrapping overhead that compounds at large n.
+- **rust-stats MLE / CSS-ML at n=10⁷** would project to ~50-70 s
+  (linear extrapolation); we skip them in the script because they're
+  not interesting numbers — the time is dominated by Nelder-Mead
+  iterations, not by the per-point cost.
+
+The L-BFGS port on the roadmap is squarely aimed at the CSS-ML / MLE
+column — if we matched R's per-fit constant, we'd be the throughput
+winner across all five columns simultaneously.
+
+Reproduce with:
+
+```sh
+cargo run --release --example bench_scaling
+Rscript tests/golden/bench_scaling_r.R
+python3 tests/golden/bench_scaling_statsmodels.py
+```
+
 ### Batched (50 series per call)
 
 Decomposing 50 independent series at once. rust-stats parallelises over
