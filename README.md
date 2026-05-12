@@ -455,6 +455,48 @@ On batched workloads R has no native form and we lead consistently
 (3–4× on `stl_batch`, ~40× on `loess_batch`, ~180× on
 `seasonal_decompose_batch`).
 
+## Roadmap
+
+Things that are known to be missing or suboptimal in the current
+code, roughly ordered by user-visible impact:
+
+### ARIMA / SARIMA
+
+- **L-BFGS optimiser for the MLE path.** Today the CSS-ML / MLE
+  fitters run Nelder-Mead on the PACF-reparameterised parameter
+  space. It's robust but slow on >5-dimensional problems — most
+  visibly on SARIMA airline-style models, where the benchmarks above
+  show rust-stats' MLE losing to both R's `arima` and pmdarima.
+  Porting to L-BFGS-B with numerical gradients should close that gap.
+- **Joint ARIMAX MLE.** `arima_with_exog` currently does the simple
+  two-stage thing: OLS for β, then ARMA on the residuals. The
+  efficient version fits (β, φ, θ) jointly inside one likelihood
+  optimisation — what R's `arima(xreg=)` and statsmodels' SARIMAX do.
+- **Kalman smoother for in-sample fitted values.** The `fitted`
+  vector currently comes from the CSS recursion; a backward pass
+  would tighten it at the start of the series.
+- **Coefficient standard errors.** No SEs / CIs on `phi`, `theta`,
+  `beta` yet. Adding them needs the Hessian of the log-likelihood at
+  the optimum — straightforward once we have a quasi-Newton optimiser
+  in place.
+
+### Transforms
+
+- **Vectorised transcendentals for `box_cox`.** The SIMD kernels
+  cover `center` / `z_score` / `min_max_scale`; `box_cox` stays
+  scalar because `pulp` doesn't ship `pow` / `ln`. A `sleef`-bound
+  variant would unlock another ~3× on the lambda ≠ 0 path.
+
+### Time-series
+
+- **Multiple seasonalities** (TBATS-style daily + weekly + yearly).
+  Currently we model one seasonal period.
+- **Non-Gaussian innovations** (Student-t residuals, etc.).
+- **GARCH / volatility models.**
+- **Multivariate models** (VAR, VARMA).
+
+If any of these would unblock you, open an issue.
+
 ## License
 
 MIT OR Apache-2.0.
