@@ -94,11 +94,24 @@ fn main() {
     let fit = arima_with_exog(&y, exog, ArimaOpts::new(1, 0, 0)).unwrap();
 
     println!("\nFitted ARIMAX(1, 0, 0):");
-    println!("  β₀ (intercept)  = {:7.3}     (truth: {:7.3})", fit.intercept, beta0_true);
-    println!("  β  (holiday)    = {:7.3}     (truth: {:7.3})", fit.beta[0], beta_holiday_true);
-    println!("  β  (promotion)  = {:7.3}     (truth: {:7.3})", fit.beta[1], beta_promo_true);
-    println!("  φ_1 (AR)        = {:7.3}     (truth: {:7.3})", fit.phi[0], phi_true);
-    println!("  σ²              = {:7.3}     (truth: {:7.3})", fit.sigma2, sigma_true.powi(2));
+    println!(
+        "  β₀ (intercept)  = {:7.3} ± {:5.3}     (truth: {:7.3})",
+        fit.intercept, fit.intercept_se, beta0_true,
+    );
+    println!(
+        "  β  (holiday)    = {:7.3} ± {:5.3}     (truth: {:7.3})",
+        fit.beta[0], fit.beta_se[0], beta_holiday_true,
+    );
+    println!(
+        "  β  (promotion)  = {:7.3} ± {:5.3}     (truth: {:7.3})",
+        fit.beta[1], fit.beta_se[1], beta_promo_true,
+    );
+    println!(
+        "  φ_1 (AR)        = {:7.3} ± {:5.3}     (truth: {:7.3})",
+        fit.phi[0], fit.phi_se[0], phi_true,
+    );
+    println!("  σ²              = {:7.3}             (truth: {:7.3})", fit.sigma2, sigma_true.powi(2));
+    println!("  (± values are 1-σ standard errors from the Hessian.)");
 
     // ── 3. Forecast the next 12 weeks. We need future X values: ──
     //    suppose marketing plans a promotion in week +3, and a known

@@ -326,33 +326,36 @@ different (faster, slightly less efficient at finite n) estimator.
 
 | Workload | n | rust CSS | rust MLE | rust CSS-ML | R arima | statsmodels |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| ARIMA(1,0,0) | 144   | **0.07** |  0.55  |  0.43  |   1.12 |   5.06 |
-| ARIMA(1,0,0) | 720   | **0.11** |  1.13  |  0.97  |   2.22 |  14.71 |
-| ARIMA(1,0,0) | 2 880 | **0.27** |  3.56  |  3.74  |   4.84 |  44.86 |
-| ARIMA(0,0,1) | 144   | **0.05** |  0.30  |  0.31  |   1.11 |   5.45 |
-| ARIMA(0,0,1) | 720   | **0.22** |  1.28  |  1.49  |   2.50 |  17.97 |
-| ARIMA(0,0,1) | 2 880 | **0.91** |  5.34  |  5.90  |   7.76 |  56.16 |
-| ARIMA(1,0,1) | 144   | **0.10** |  0.65  |  0.74  |   1.69 |   7.95 |
-| ARIMA(1,0,1) | 720   | **0.46** |  2.73  |  3.30  |   4.11 |  22.61 |
-| ARIMA(1,0,1) | 2 880 | **1.80** | 11.43  | 12.63  |  16.23 |  76.93 |
-| ARIMA(0,1,1) | 144   | **0.05** |  0.28  |  0.29  |   0.37 |   3.70 |
-| ARIMA(0,1,1) | 720   | **0.22** |  1.21  |  1.47  |   1.06 |  10.43 |
-| ARIMA(0,1,1) | 2 880 |   0.86   |  4.89  |  5.44  | **2.25** | 27.75 |
-| ARIMA(1,1,1) | 144   | **0.12** |  0.76  |  0.81  |  13.28 |   7.42 |
-| ARIMA(1,1,1) | 720   | **0.54** |  2.83  |  3.70  |   4.47 |  17.23 |
-| ARIMA(1,1,1) | 2 880 | **2.09** | 12.08  | 14.12  |   9.53 |  57.21 |
-| SARIMA(0,1,1)(0,1,1)[12] | 144 | **0.34** |  49.77 |  42.13 |  16.24 | 214.37 |
-| SARIMA(0,1,1)(0,1,1)[12] | 288 | **0.72** |  48.74 |  33.47 |  31.63 | 285.61 |
+| ARIMA(1,0,0) | 144   | **0.23** |  0.58  |  0.44  |   1.12 |   5.06 |
+| ARIMA(1,0,0) | 720   | **0.32** |  1.17  |  1.12  |   2.22 |  14.71 |
+| ARIMA(1,0,0) | 2 880 | **0.92** |  4.24  |  4.43  |   4.84 |  44.86 |
+| ARIMA(0,0,1) | 144   | **0.10** |  0.35  |  0.36  |   1.11 |   5.45 |
+| ARIMA(0,0,1) | 720   | **0.45** |  1.52  |  1.71  |   2.50 |  17.97 |
+| ARIMA(0,0,1) | 2 880 | **1.82** |  6.24  |  6.87  |   7.76 |  56.16 |
+| ARIMA(1,0,1) | 144   | **0.21** |  0.77  |  0.85  |   1.69 |   7.95 |
+| ARIMA(1,0,1) | 720   | **0.95** |  3.23  |  3.81  |   4.11 |  22.61 |
+| ARIMA(1,0,1) | 2 880 | **3.79** | 13.32  | 14.73  |  16.23 |  76.93 |
+| ARIMA(0,1,1) | 144   | **0.10** |  0.33  |  0.34  |   0.37 |   3.70 |
+| ARIMA(0,1,1) | 720   | **0.45** |  1.45  |  1.71  |   1.06 |  10.43 |
+| ARIMA(0,1,1) | 2 880 |   1.77   |  5.84  |  6.45  | **2.25** | 27.75 |
+| ARIMA(1,1,1) | 144   | **0.23** |  0.87  |  0.91  |  13.28 |   7.42 |
+| ARIMA(1,1,1) | 720   | **1.04** |  3.36  |  4.25  |   4.47 |  17.23 |
+| ARIMA(1,1,1) | 2 880 | **4.03** | 13.97  | 16.16  |   9.53 |  57.21 |
+| SARIMA(0,1,1)(0,1,1)[12] | 144 |   7.57   |  55.37 |  47.81 | **16.24** | 214.37 |
+| SARIMA(0,1,1)(0,1,1)[12] | 288 | **15.09** |  61.36 |  46.87 |  31.63 | 285.61 |
 
-(All times in ms, median of 3–50 iters.)
+(All times in ms, median of 3–50 iters.) Rust numbers include the
+per-fit standard-error pass (Hessian + inversion of the natural-space
+NLL); see the SE bullet in the Roadmap section below for the cost
+breakdown — most cells regressed by ~10-30 % vs the previous numbers
+because every fit now ships SEs, matching R's `var.coef` convention.
 
 **rust-stats CSS-ML vs R arima** (both Kalman MLE with CSS seeds):
-rust-stats is roughly **1.5–3× faster** on non-seasonal models. R
-still wins on **SARIMA** (R 16.2 ms vs ours 42.1 ms on the airline
-model at n=144) — R's `arima` is a mature Fortran/C implementation —
-but the strong-Wolfe L-BFGS gate we added for seasonal MLE / CSS-ML
-cut our SARIMA times by ~2× from the original Nelder-Mead-only
-numbers (95.9 → 33.5 ms at n=288).
+rust-stats is **1.1–2× faster** on non-seasonal models. R still wins
+on **SARIMA** (R 16.2 ms vs ours 47.8 ms on the airline model at
+n=144) — R's `arima` is a mature Fortran/C implementation — but the
+strong-Wolfe L-BFGS gate we added for seasonal MLE / CSS-ML cut our
+SARIMA times by ~2× from the original Nelder-Mead-only numbers.
 
 **rust-stats MLE vs statsmodels SARIMAX** (same Gaussian Kalman
 objective, both default-optimised): rust-stats is **3–18× faster**
@@ -535,10 +538,16 @@ code, roughly ordered by user-visible impact:
 - **Kalman smoother for in-sample fitted values.** The `fitted`
   vector currently comes from the CSS recursion; a backward pass
   would tighten it at the start of the series.
-- **Coefficient standard errors.** No SEs / CIs on `phi`, `theta`,
-  `beta` yet. Adding them needs the Hessian of the log-likelihood at
-  the optimum — straightforward once we have a quasi-Newton optimiser
-  in place.
+- ~~**Coefficient standard errors.**~~ Done. `ArimaFit` exposes
+  `phi_se`, `theta_se`, `seasonal_phi_se`, `seasonal_theta_se`,
+  `beta_se`, `intercept_se`. SEs are the square roots of the diagonal
+  of the inverse numerical Hessian of the Kalman concentrated
+  log-likelihood at the optimum, computed in the *natural* parameter
+  space (no PACF reparameterisation) — same convention R's `arima`
+  uses (`var.coef` is from the Kalman likelihood regardless of `method`).
+  Returns `NaN` when the Hessian fails to be positive definite (rare;
+  happens near a stationarity boundary). Cost: ~25-50% on top of the
+  fit time itself (one extra `2 n² + 1`-eval Hessian pass per fit).
 
 ### Transforms
 

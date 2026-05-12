@@ -130,6 +130,22 @@ pub struct ArimaFit {
     /// order they were passed). Empty when the model was fitted without
     /// exogenous inputs.
     pub beta: Vec<f64>,
+    /// Standard error of the intercept. `NaN` when the Hessian
+    /// inversion failed (rare; near a stationarity boundary). All
+    /// `*_se` fields are computed in the natural parameter space via
+    /// the numerical Hessian of the Kalman concentrated log-likelihood
+    /// at the optimum — same convention as R's `var.coef`.
+    pub intercept_se: f64,
+    /// Standard errors of `phi`.
+    pub phi_se: Vec<f64>,
+    /// Standard errors of `theta`.
+    pub theta_se: Vec<f64>,
+    /// Standard errors of `seasonal_phi`.
+    pub seasonal_phi_se: Vec<f64>,
+    /// Standard errors of `seasonal_theta`.
+    pub seasonal_theta_se: Vec<f64>,
+    /// Standard errors of `beta`.
+    pub beta_se: Vec<f64>,
     /// Intercept. For an exog-free fit this is the mean of the
     /// differenced series (`0.0` if `include_constant = false`). For an
     /// exog fit it is the OLS intercept of the level regression
@@ -483,6 +499,9 @@ fn arima_joint_exog(
         .collect();
     let last_obs: Vec<f64> = e[n.saturating_sub(total_diff)..].to_vec();
 
+    let ses = standard_errors(
+        y, exog, beta0_final, &beta_final, &phi, &phi_s, &theta, &theta_s, d, big_d, mm,
+    );
     Ok(ArimaFit {
         phi,
         theta,
@@ -490,6 +509,12 @@ fn arima_joint_exog(
         seasonal_theta: theta_s,
         beta: beta_final,
         intercept: beta0_final,
+        intercept_se: ses.intercept,
+        phi_se: ses.phi,
+        theta_se: ses.theta,
+        seasonal_phi_se: ses.seasonal_phi,
+        seasonal_theta_se: ses.seasonal_theta,
+        beta_se: ses.beta,
         sigma2,
         log_likelihood: log_lik,
         aic,
@@ -712,6 +737,9 @@ fn arima_no_exog(y: &[f64], opts: ArimaOpts) -> Result<ArimaFit, ArimaError> {
         .collect();
     let last_obs: Vec<f64> = y[n.saturating_sub(total_diff)..].to_vec();
 
+    let ses = standard_errors(
+        y, &[], intercept, &[], &phi, &phi_s, &theta, &theta_s, d, big_d, mm,
+    );
     Ok(ArimaFit {
         phi,
         theta,
@@ -719,6 +747,12 @@ fn arima_no_exog(y: &[f64], opts: ArimaOpts) -> Result<ArimaFit, ArimaError> {
         seasonal_theta: theta_s,
         beta: Vec::new(),
         intercept,
+        intercept_se: ses.intercept,
+        phi_se: ses.phi,
+        theta_se: ses.theta,
+        seasonal_phi_se: ses.seasonal_phi,
+        seasonal_theta_se: ses.seasonal_theta,
+        beta_se: ses.beta,
         sigma2,
         log_likelihood: log_lik,
         aic,
@@ -1241,6 +1275,220 @@ fn unpack_full(
 /// Returns (φ_seed, θ_seed). If either step's normal-equations matrix is
 /// singular, returns zeros (a perfectly safe starting point — the
 /// optimiser will still converge from there).
+/// Bundle of standard errors keyed by coefficient kind. Each component
+/// has length matching its corresponding coefficient vector on
+/// `ArimaFit`. NaN entries indicate the Hessian inversion failed for
+/// that block.
+struct ArimaSes {
+    intercept: f64,
+    beta: Vec<f64>,
+    phi: Vec<f64>,
+    seasonal_phi: Vec<f64>,
+    theta: Vec<f64>,
+    seasonal_theta: Vec<f64>,
+}
+
+/// Compute coefficient standard errors via the numerical Hessian of
+/// the Kalman concentrated log-likelihood at the optimum, evaluated in
+/// the *natural* parameter space (no PACF reparameterisation). The
+/// inverse Hessian's diagonal gives `Var(θ̂)`; sqrt of those is the
+/// reported SE.
+///
+/// Same convention R's `arima` uses (`var.coef` is computed from the
+/// Kalman likelihood Hessian regardless of fitting `method`).
+///
+/// Returns NaN-filled SEs if the Hessian fails to be positive definite
+/// — typically when the optimum sits near a stationarity boundary,
+/// where the likelihood surface is flat and the finite-difference
+/// Hessian is ill-conditioned.
+#[allow(clippy::too_many_arguments)]
+fn standard_errors(
+    y: &[f64],
+    exog: &[&[f64]],
+    beta0: f64,
+    beta: &[f64],
+    phi: &[f64],
+    seasonal_phi: &[f64],
+    theta: &[f64],
+    seasonal_theta: &[f64],
+    d: usize,
+    big_d: usize,
+    mm: usize,
+) -> ArimaSes {
+    let k = beta.len();
+    let p = phi.len();
+    let big_p = seasonal_phi.len();
+    let q = theta.len();
+    let big_q = seasonal_theta.len();
+    let total = 1 + k + p + big_p + q + big_q;
+
+    // Pack natural-parameter vector.
+    let mut x = Vec::with_capacity(total);
+    x.push(beta0);
+    x.extend_from_slice(beta);
+    x.extend_from_slice(phi);
+    x.extend_from_slice(seasonal_phi);
+    x.extend_from_slice(theta);
+    x.extend_from_slice(seasonal_theta);
+
+    // Natural-space NLL: build (β₀, β, φ, Φ, θ, Θ) from `v`, compute
+    // e = y − β₀ − β·X, difference, and run the Kalman concentrated
+    // negative log-likelihood.
+    let n = y.len();
+    let nat_nll = |v: &[f64]| -> f64 {
+        let beta0 = v[0];
+        let beta = &v[1..1 + k];
+        let phi = &v[1 + k..1 + k + p];
+        let phi_s = &v[1 + k + p..1 + k + p + big_p];
+        let theta = &v[1 + k + p + big_p..1 + k + p + big_p + q];
+        let theta_s = &v[1 + k + p + big_p + q..];
+        let mut e = vec![0.0f64; n];
+        for i in 0..n {
+            e[i] = y[i] - beta0;
+            for j in 0..k {
+                e[i] -= beta[j] * exog[j][i];
+            }
+        }
+        let w_e = full_difference(&e, d, big_d, mm);
+        let total_ar = convolve_ar(phi, phi_s, mm);
+        let total_ma = convolve_ma(theta, theta_s, mm);
+        kalman::concentrated_neg_loglik(&w_e, &total_ar, &total_ma)
+    };
+
+    let hessian = numerical_hessian(&nat_nll, &x);
+    let ses_flat = match invert_symmetric_pd(&hessian, total) {
+        Some(cov) => (0..total)
+            .map(|i| {
+                let v = cov[i * total + i];
+                if v.is_finite() && v > 0.0 { v.sqrt() } else { f64::NAN }
+            })
+            .collect::<Vec<f64>>(),
+        None => vec![f64::NAN; total],
+    };
+
+    let mut idx = 0;
+    let intercept = ses_flat[idx];
+    idx += 1;
+    let beta_se: Vec<f64> = ses_flat[idx..idx + k].to_vec();
+    idx += k;
+    let phi_se: Vec<f64> = ses_flat[idx..idx + p].to_vec();
+    idx += p;
+    let seasonal_phi_se: Vec<f64> = ses_flat[idx..idx + big_p].to_vec();
+    idx += big_p;
+    let theta_se: Vec<f64> = ses_flat[idx..idx + q].to_vec();
+    idx += q;
+    let seasonal_theta_se: Vec<f64> = ses_flat[idx..idx + big_q].to_vec();
+
+    ArimaSes {
+        intercept,
+        beta: beta_se,
+        phi: phi_se,
+        seasonal_phi: seasonal_phi_se,
+        theta: theta_se,
+        seasonal_theta: seasonal_theta_se,
+    }
+}
+
+/// Numerical Hessian via four-point central differences. Diagonals use
+/// the three-point central second-derivative stencil; off-diagonals use
+/// the standard four-corner mixed-derivative stencil.
+///
+/// Step size is scaled per-coordinate so the relative resolution is
+/// uniform across well-scaled and badly-scaled parameters.
+fn numerical_hessian<F: Fn(&[f64]) -> f64>(f: &F, x: &[f64]) -> Vec<f64> {
+    let n = x.len();
+    let mut hess = vec![0.0f64; n * n];
+    let mut buf = x.to_vec();
+    let fx = f(&buf);
+    let h: Vec<f64> = x.iter().map(|&v| 1e-4 * (1.0 + v.abs())).collect();
+
+    // Diagonals
+    for i in 0..n {
+        let orig = buf[i];
+        buf[i] = orig + h[i];
+        let f_pp = f(&buf);
+        buf[i] = orig - h[i];
+        let f_mm = f(&buf);
+        buf[i] = orig;
+        hess[i * n + i] = (f_pp - 2.0 * fx + f_mm) / (h[i] * h[i]);
+    }
+
+    // Off-diagonals (upper triangle, then mirror)
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let oi = buf[i];
+            let oj = buf[j];
+            buf[i] = oi + h[i];
+            buf[j] = oj + h[j];
+            let fpp = f(&buf);
+            buf[j] = oj - h[j];
+            let fpm = f(&buf);
+            buf[i] = oi - h[i];
+            let fmm = f(&buf);
+            buf[j] = oj + h[j];
+            let fmp = f(&buf);
+            buf[i] = oi;
+            buf[j] = oj;
+            let v = (fpp - fpm - fmp + fmm) / (4.0 * h[i] * h[j]);
+            hess[i * n + j] = v;
+            hess[j * n + i] = v;
+        }
+    }
+
+    hess
+}
+
+/// Invert a symmetric positive-definite matrix `a` (row-major, n × n)
+/// via Cholesky factorisation. Returns `None` if `a` is not strictly
+/// PD (a numerical-Hessian failure mode near stationarity boundaries).
+fn invert_symmetric_pd(a: &[f64], n: usize) -> Option<Vec<f64>> {
+    // In-place Cholesky: a = L Lᵀ, with L stored in the lower triangle.
+    let mut l = a.to_vec();
+    for i in 0..n {
+        for j in 0..=i {
+            let mut sum = l[i * n + j];
+            for k in 0..j {
+                sum -= l[i * n + k] * l[j * n + k];
+            }
+            if i == j {
+                if sum <= 0.0 || !sum.is_finite() {
+                    return None;
+                }
+                l[i * n + j] = sum.sqrt();
+            } else {
+                l[i * n + j] = sum / l[j * n + j];
+            }
+        }
+    }
+
+    // For each column `col`, solve L Lᵀ x = e_col → column `col` of A⁻¹.
+    let mut inv = vec![0.0f64; n * n];
+    let mut z = vec![0.0f64; n];
+    let mut sol = vec![0.0f64; n];
+    for col in 0..n {
+        // Forward solve L z = e_col.
+        for i in 0..n {
+            let mut sum = if i == col { 1.0 } else { 0.0 };
+            for kk in 0..i {
+                sum -= l[i * n + kk] * z[kk];
+            }
+            z[i] = sum / l[i * n + i];
+        }
+        // Backward solve Lᵀ x = z.
+        for i in (0..n).rev() {
+            let mut sum = z[i];
+            for kk in (i + 1)..n {
+                sum -= l[kk * n + i] * sol[kk];
+            }
+            sol[i] = sum / l[i * n + i];
+        }
+        for i in 0..n {
+            inv[i * n + col] = sol[i];
+        }
+    }
+    Some(inv)
+}
+
 /// L-BFGS for the Kalman MLE objective, with a Nelder-Mead fallback
 /// when the gradient norm doesn't quite reach `grad_tol`. Both arms
 /// converge to the same neighbourhood — strong-Wolfe L-BFGS lands
