@@ -49,6 +49,133 @@ pub fn min_max_scale(y: &[f64]) -> Vec<f64> {
     pulp_impl::min_max_scale(y)
 }
 
+/// Z-score (standard) scaler: subtracts mean, divides by sample
+/// standard deviation (ddof = 1, matching R's `scale()`).
+///
+/// Use this when you need to apply the *same* scaling to multiple
+/// series — typical ML train/test split or threading a forecast back
+/// through `inverse_transform` to recover original units. For a
+/// one-shot call, the free [`z_score`] function is shorter.
+///
+/// ```ignore
+/// let s = StandardScaler::fit(&y_train);
+/// let z_train = s.transform(&y_train);
+/// let z_test  = s.transform(&y_test);
+/// // … model on z_train, forecast z_hat …
+/// let y_hat   = s.inverse_transform(&z_hat);
+/// ```
+///
+/// `fit` on empty or all-NaN input produces a degenerate scaler with
+/// `mean = std_dev = 0`; `transform` then maps every finite value to
+/// 0, matching the free-function behaviour.
+#[derive(Debug, Clone, Copy)]
+pub struct StandardScaler {
+    mean: f64,
+    std_dev: f64,
+}
+
+impl StandardScaler {
+    /// Compute mean + sample SD (ddof = 1) over the finite entries.
+    pub fn fit(y: &[f64]) -> Self {
+        let (mean, std_dev) = pulp_impl::mean_std(y);
+        Self { mean, std_dev }
+    }
+
+    /// Apply `(y − mean) / std_dev`. When `std_dev == 0`, all finite
+    /// entries collapse to 0 (NaNs propagate).
+    pub fn transform(&self, y: &[f64]) -> Vec<f64> {
+        let inv = if self.std_dev == 0.0 { 0.0 } else { 1.0 / self.std_dev };
+        pulp_impl::affine(y, self.mean, inv)
+    }
+
+    /// Undo the forward transform: `z · std_dev + mean`. When
+    /// `std_dev == 0`, every finite `z` maps to `mean` (the forward
+    /// step was lossy) and NaNs propagate.
+    pub fn inverse_transform(&self, z: &[f64]) -> Vec<f64> {
+        if self.std_dev == 0.0 {
+            let m = self.mean;
+            return z
+                .iter()
+                .map(|&v| if v.is_nan() { f64::NAN } else { m })
+                .collect();
+        }
+        pulp_impl::mul_add(z, self.std_dev, self.mean)
+    }
+
+    /// Fitted mean.
+    #[inline]
+    pub fn mean(&self) -> f64 {
+        self.mean
+    }
+    /// Fitted sample standard deviation (ddof = 1).
+    #[inline]
+    pub fn std_dev(&self) -> f64 {
+        self.std_dev
+    }
+}
+
+/// Min-max scaler: maps `[min, max]` from the training data into
+/// `[0, 1]`. Parallels [`StandardScaler`] in shape.
+///
+/// ```ignore
+/// let s = MinMaxScaler::fit(&y_train);
+/// let z_train = s.transform(&y_train);
+/// let z_test  = s.transform(&y_test);     // may fall outside [0, 1]
+/// let y_hat   = s.inverse_transform(&z_hat);
+/// ```
+///
+/// Test-time inputs that lie outside the fitted range produce outputs
+/// outside `[0, 1]` — that's the standard contract (sklearn behaves the
+/// same; the scaler is not a clamp). `fit` on empty / all-NaN input
+/// produces a degenerate scaler with `min = max = 0`, and `transform`
+/// maps every finite value to 0.
+#[derive(Debug, Clone, Copy)]
+pub struct MinMaxScaler {
+    min: f64,
+    max: f64,
+}
+
+impl MinMaxScaler {
+    /// Compute min + max over the finite entries.
+    pub fn fit(y: &[f64]) -> Self {
+        let (min, max) = pulp_impl::finite_extrema(y);
+        Self { min, max }
+    }
+
+    /// Apply `(y − min) / (max − min)`. Constant fits (`max == min`)
+    /// collapse every finite value to 0.
+    pub fn transform(&self, y: &[f64]) -> Vec<f64> {
+        let range = self.max - self.min;
+        let inv = if range == 0.0 { 0.0 } else { 1.0 / range };
+        pulp_impl::affine(y, self.min, inv)
+    }
+
+    /// Undo: `z · (max − min) + min`. Constant fits return `min` for
+    /// every finite `z`; NaNs propagate.
+    pub fn inverse_transform(&self, z: &[f64]) -> Vec<f64> {
+        let range = self.max - self.min;
+        if range == 0.0 {
+            let m = self.min;
+            return z
+                .iter()
+                .map(|&v| if v.is_nan() { f64::NAN } else { m })
+                .collect();
+        }
+        pulp_impl::mul_add(z, range, self.min)
+    }
+
+    /// Fitted minimum.
+    #[inline]
+    pub fn min(&self) -> f64 {
+        self.min
+    }
+    /// Fitted maximum.
+    #[inline]
+    pub fn max(&self) -> f64 {
+        self.max
+    }
+}
+
 /// Inverse Box-Cox: given `y = box_cox(x, λ)`, recover `x`.
 ///
 /// ```text
@@ -803,6 +930,69 @@ mod pulp_impl {
         arch.dispatch(AffineInto { y, out: &mut out, c: lo, k: inv });
         out
     }
+
+    /// `(y − c) · k` lifted to a free helper — used by `StandardScaler`
+    /// and `MinMaxScaler` for the forward direction.
+    pub(super) fn affine(y: &[f64], c: f64, k: f64) -> Vec<f64> {
+        let arch = Arch::new();
+        let mut out = vec![0.0; y.len()];
+        arch.dispatch(AffineInto { y, out: &mut out, c, k });
+        out
+    }
+
+    struct MulAddInto<'a> {
+        y: &'a [f64],
+        out: &'a mut [f64],
+        k: f64,
+        c: f64,
+    }
+    impl<'a> WithSimd for MulAddInto<'a> {
+        type Output = ();
+        #[inline(always)]
+        fn with_simd<S: Simd>(self, simd: S) {
+            let Self { y, out, k, c } = self;
+            let c_v = simd.splat_f64s(c);
+            let k_v = simd.splat_f64s(k);
+            let (y_head, y_tail) = S::as_simd_f64s(y);
+            let (o_head, o_tail) = S::as_mut_simd_f64s(out);
+            for (yv, ov) in y_head.iter().zip(o_head.iter_mut()) {
+                *ov = simd.add_f64s(simd.mul_f64s(*yv, k_v), c_v);
+            }
+            for (yv, ov) in y_tail.iter().zip(o_tail.iter_mut()) {
+                *ov = *yv * k + c;
+            }
+        }
+    }
+
+    /// `y · k + c` per element — used by the scaler `inverse_transform`
+    /// methods to undo a previously-applied affine.
+    pub(super) fn mul_add(y: &[f64], k: f64, c: f64) -> Vec<f64> {
+        let arch = Arch::new();
+        let mut out = vec![0.0; y.len()];
+        arch.dispatch(MulAddInto { y, out: &mut out, k, c });
+        out
+    }
+
+    /// Fit-time mean + sample SD (ddof = 1) over the finite entries.
+    /// Used by `StandardScaler::fit`. Returns `(mean, std)`; either may
+    /// be `0.0` for degenerate inputs (empty / single finite value).
+    pub(super) fn mean_std(y: &[f64]) -> (f64, f64) {
+        let arch = Arch::new();
+        let (sum, cnt) = arch.dispatch(FiniteSumCount { y });
+        let mean = if cnt == 0 { 0.0 } else { sum / cnt as f64 };
+        let std = if cnt < 2 {
+            0.0
+        } else {
+            (arch.dispatch(FiniteSumSq { y, mean }) / (cnt - 1) as f64).sqrt()
+        };
+        (mean, std)
+    }
+
+    /// Fit-time min + max over the finite entries. Returns `(0.0, 0.0)`
+    /// when no finite value is present.
+    pub(super) fn finite_extrema(y: &[f64]) -> (f64, f64) {
+        Arch::new().dispatch(FiniteMinMax { y })
+    }
 }
 
 #[cfg(test)]
@@ -1081,6 +1271,143 @@ mod tests {
         let from_free = box_cox(&y, 0.75).unwrap().transformed;
         for (a, b) in from_struct.iter().zip(from_free.iter()) {
             assert_eq!(a, b);
+        }
+    }
+
+    // --- StandardScaler ---
+
+    #[test]
+    fn standard_scaler_fit_matches_free_function() {
+        // For the same input, transform via the struct must equal the
+        // free `z_score` output to machine precision.
+        let y = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let s = StandardScaler::fit(&y);
+        let z_struct = s.transform(&y);
+        let z_free = z_score(&y);
+        for (a, b) in z_struct.iter().zip(z_free.iter()) {
+            assert_relative_eq!(a, b, max_relative = 1e-12);
+        }
+    }
+
+    #[test]
+    fn standard_scaler_transform_inverse_roundtrips() {
+        let y = vec![10.0, 12.5, 9.0, 11.0, 13.0, 8.5];
+        let s = StandardScaler::fit(&y);
+        let z = s.transform(&y);
+        let back = s.inverse_transform(&z);
+        for (a, b) in y.iter().zip(back.iter()) {
+            assert_relative_eq!(a, b, max_relative = 1e-12);
+        }
+    }
+
+    #[test]
+    fn standard_scaler_applies_train_params_to_test() {
+        // Fitting on train and transforming test means the test mean is
+        // *not* zero (only the train's would be).
+        let train = vec![10.0, 11.0, 12.0, 13.0, 14.0];
+        let test = vec![20.0, 21.0]; // shifted up by 10
+        let s = StandardScaler::fit(&train);
+        let z_test = s.transform(&test);
+        // (20 - 12) / sd  where sd = sqrt(2.5) ≈ 1.5811
+        let sd = (2.5f64).sqrt();
+        assert_relative_eq!(z_test[0], 8.0 / sd, max_relative = 1e-12);
+        assert_relative_eq!(z_test[1], 9.0 / sd, max_relative = 1e-12);
+    }
+
+    #[test]
+    fn standard_scaler_constant_input_collapses_to_zero() {
+        let y = vec![4.2; 5];
+        let s = StandardScaler::fit(&y);
+        assert_eq!(s.std_dev(), 0.0);
+        let z = s.transform(&y);
+        for v in &z {
+            assert_eq!(*v, 0.0);
+        }
+        // Inverse maps every finite value back to the mean.
+        let back = s.inverse_transform(&z);
+        for v in &back {
+            assert_eq!(*v, 4.2);
+        }
+    }
+
+    #[test]
+    fn standard_scaler_propagates_nan() {
+        let y = vec![1.0, f64::NAN, 3.0, 5.0];
+        let s = StandardScaler::fit(&y);
+        let z = s.transform(&y);
+        assert!(z[1].is_nan());
+        let back = s.inverse_transform(&z);
+        assert!(back[1].is_nan());
+    }
+
+    #[test]
+    fn standard_scaler_accessors_match_fit() {
+        let y = vec![2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0];
+        let s = StandardScaler::fit(&y);
+        assert_relative_eq!(s.mean(), 5.0, max_relative = 1e-12);
+        // ddof=1 SD = sqrt(32/7).
+        assert_relative_eq!(s.std_dev(), (32.0_f64 / 7.0).sqrt(), max_relative = 1e-12);
+    }
+
+    // --- MinMaxScaler ---
+
+    #[test]
+    fn min_max_scaler_fit_matches_free_function() {
+        let y = vec![-2.0, 0.5, 3.0, 7.0, 11.0];
+        let s = MinMaxScaler::fit(&y);
+        let z_struct = s.transform(&y);
+        let z_free = min_max_scale(&y);
+        for (a, b) in z_struct.iter().zip(z_free.iter()) {
+            assert_relative_eq!(a, b, max_relative = 1e-12);
+        }
+    }
+
+    #[test]
+    fn min_max_scaler_endpoints_exact() {
+        let y = vec![0.0, 5.0, 10.0];
+        let s = MinMaxScaler::fit(&y);
+        let z = s.transform(&y);
+        assert_eq!(z[0], 0.0);
+        assert_eq!(z[2], 1.0);
+        assert_relative_eq!(z[1], 0.5, max_relative = 1e-12);
+    }
+
+    #[test]
+    fn min_max_scaler_transform_inverse_roundtrips() {
+        let y = vec![1.5, 7.25, 3.0, 4.5, 9.0, 2.25];
+        let s = MinMaxScaler::fit(&y);
+        let z = s.transform(&y);
+        let back = s.inverse_transform(&z);
+        for (a, b) in y.iter().zip(back.iter()) {
+            assert_relative_eq!(a, b, max_relative = 1e-12);
+        }
+    }
+
+    #[test]
+    fn min_max_scaler_test_data_can_exit_unit_interval() {
+        // Fit on train, transform test that's above train.max — the
+        // standard sklearn contract: outputs above 1.0 are allowed.
+        let train = vec![0.0, 5.0, 10.0];
+        let test = vec![15.0, -5.0];
+        let s = MinMaxScaler::fit(&train);
+        let z = s.transform(&test);
+        assert_relative_eq!(z[0], 1.5, max_relative = 1e-12);
+        assert_relative_eq!(z[1], -0.5, max_relative = 1e-12);
+    }
+
+    #[test]
+    fn min_max_scaler_constant_input_collapses_to_zero() {
+        let y = vec![7.0, 7.0, 7.0];
+        let s = MinMaxScaler::fit(&y);
+        assert_eq!(s.min(), 7.0);
+        assert_eq!(s.max(), 7.0);
+        let z = s.transform(&y);
+        for v in &z {
+            assert_eq!(*v, 0.0);
+        }
+        let back = s.inverse_transform(&z);
+        for v in &back {
+            assert_eq!(*v, 7.0);
         }
     }
 
