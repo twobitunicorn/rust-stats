@@ -375,6 +375,42 @@ python3 tests/golden/bench_arima_statsmodels.py
 Rscript tests/golden/bench_arima_r.R
 ```
 
+#### auto_arima vs pmdarima
+
+For *automated* model selection — `auto_arima(y)` / `pm.auto_arima(y)`
+end-to-end — the relevant comparison is how long it takes to go from
+raw series to a fitted model. Both implementations run the
+Hyndman-Khandakar stepwise search; the difference is per-candidate fit
+cost.
+
+| Workload | n | rust CSS (default) | rust MLE | pmdarima |
+| --- | ---: | ---: | ---: | ---: |
+| auto_arima                      | 144   |    **6.6** |       96.3 |    105.5 |
+| auto_arima                      | 720   |   **97.4** |    7 019.4 |    633.8 |
+| auto_arima                      | 2 880 |  **255.3** |    8 248.6 |  1 410.5 |
+| auto_arima [m=12 airline model] | 144   |  **102.3** |  174 530.6 | 25 848.3 |
+| auto_arima [m=12 airline model] | 288   |  **134.7** |        —   | 70 536.5 |
+
+(All times in ms, median of 1–10 iters. Rust MLE at airline n=288
+didn't finish in reasonable wall-clock — our Nelder-Mead × iterative
+Lyapunov × stepwise candidates is a slow inner triple.)
+
+- **rust-stats CSS (default) vs pmdarima**: rust-stats is **6–525×
+  faster** end-to-end on `auto_arima`, with the biggest multiplier on
+  seasonal models (where pmdarima fits ~50 SARIMAX candidates each at
+  ~1 s).
+- **rust-stats MLE vs pmdarima** (same Gaussian Kalman objective):
+  pmdarima wins. Our Nelder-Mead optimiser is slower than scipy's
+  L-BFGS-B once the parameter space gets non-trivial. An L-BFGS port
+  is the natural fix and lives on the roadmap.
+
+Reproduce with:
+
+```sh
+cargo run --release --example bench_auto_arima
+python3 tests/golden/bench_auto_arima_pmdarima.py
+```
+
 ### Batched (50 series per call)
 
 Decomposing 50 independent series at once. rust-stats parallelises over
