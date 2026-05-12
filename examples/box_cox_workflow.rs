@@ -9,7 +9,7 @@
 //!
 //!   cargo run --release --example box_cox_workflow
 
-use rust_stats::{arima, box_cox, ArimaOpts, BoxCox, Lambda};
+use rust_stats::{arima, box_cox, inv_box_cox, ArimaOpts, BoxCox, Lambda};
 
 fn main() {
     // ── 1. Build a monthly series with multiplicative variance. ─────
@@ -31,7 +31,38 @@ fn main() {
         y.iter().copied().fold(f64::NEG_INFINITY, f64::max),
     );
 
-    // ── 2. Compare the three λ estimators side by side. ─────────────
+    // ── 2. API tour: four equivalent ways to box-cox the same data. ─
+    //    All four produce identical `transformed` slices for the same
+    //    final λ. Pick the form that fits your call site — the struct
+    //    is best when you'll apply the same λ to multiple slices or
+    //    invert later; the free function is best for one-off use.
+    {
+        // (a) Free function, *fixed* λ. The classic "I know what I want".
+        let out = box_cox(&y, 0.5).unwrap();
+        let _z = out.transformed;
+        let _back = inv_box_cox(&_z, out.lambda).unwrap();
+
+        // (b) Free function, *estimator*. Convenience for a one-shot
+        //     fit + transform; `out.lambda` echoes what was chosen.
+        let out = box_cox(&y, Lambda::Mle).unwrap();
+        let _z = out.transformed;
+        let _back = inv_box_cox(&_z, out.lambda).unwrap();
+
+        // (c) Struct, fixed λ. Useful when you want to apply the same
+        //     transform to multiple series without copying λ around.
+        let bc = BoxCox::new(0.5);
+        let _z = bc.transform(&y).unwrap();
+        let _back = bc.inverse_transform(&_z).unwrap();
+
+        // (d) Struct, estimator. The "fit once, transform many, invert
+        //     against the forecast" pattern — what the SARIMA workflow
+        //     below uses.
+        let bc = BoxCox::fit(&y, Lambda::Mle).unwrap();
+        let _z = bc.transform(&y).unwrap();
+        let _back = bc.inverse_transform(&_z).unwrap();
+    }
+
+    // ── 3. Compare the three λ estimators side by side. ─────────────
     //    - Guerrero: minimises CV of σ_b / μ_b^(1-λ) within cycles —
     //      stabilises seasonal variance. Use this for forecasting.
     //    - MLE / loglik: maximises Gaussian log-likelihood of the
@@ -60,7 +91,7 @@ fn main() {
 
     let z = bc.transform(&y).unwrap();
 
-    // ── 3. Fit SARIMA on the transformed series. ────────────────────
+    // ── 4. Fit SARIMA on the transformed series. ────────────────────
     //    For an automated search, swap in:
     //    `auto_arima(&z, AutoArimaOpts::seasonal(m as u32))`.
     let fit = arima(&z, ArimaOpts::seasonal(1, 1, 1, 0, 1, 1, m as u32)).unwrap();
@@ -69,11 +100,11 @@ fn main() {
         fit.aicc, fit.sigma2, fit.n_obs,
     );
 
-    // ── 4. Forecast on the transformed scale with 95% intervals. ────
+    // ── 5. Forecast on the transformed scale with 95% intervals. ────
     let horizon = 12;
     let f = fit.forecast_with_intervals(horizon, 0.05);
 
-    // ── 5. Back-transform the mean and the interval bounds. ─────────
+    // ── 6. Back-transform the mean and the interval bounds. ─────────
     //    BoxCox::inverse_transform is monotonic, so transforming the
     //    lower / upper quantiles individually gives correctly-
     //    calibrated bounds on the original scale. They will be
@@ -92,7 +123,7 @@ fn main() {
         );
     }
 
-    // ── 6. Sanity: forward / inverse should round-trip the input. ───
+    // ── 7. Sanity: forward / inverse should round-trip the input. ───
     //    Two ways to do the same thing:
     //
     //    let out = box_cox(&y, bc.lambda())?;            // one-shot
