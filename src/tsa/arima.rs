@@ -616,20 +616,18 @@ fn arima_no_exog(y: &[f64], opts: ArimaOpts) -> Result<ArimaFit, ArimaError> {
         let total_ma = convolve_ma(&theta, &theta_s, mm);
         kalman::concentrated_neg_loglik(&w_centered, &total_ar, &total_ma)
     };
-    // Optimisation strategy. Strong-Wolfe L-BFGS pays a `2n+1`-feval
-    // gradient cost per iteration. That's a win when each evaluation
-    // is expensive (Kalman filter on a large state-space dimension
-    // — i.e., seasonal models) and a loss otherwise (CSS recursion,
-    // or non-seasonal Kalman with small state dim where the ARMA
-    // identifiability ridge makes L-BFGS oscillate). So:
+    let mle_obj_with_grad = |x: &[f64]| -> (f64, Vec<f64>) {
+        mle_value_and_grad(x, &w_centered, p, big_p, q, big_q, mm)
+    };
+    // Optimisation strategy. Strong-Wolfe L-BFGS with analytic Kalman
+    // gradient (forward sensitivity propagation through the filter)
+    // replaces the previous `2·n + 1`-feval finite-difference gradient.
+    // Seasonal models benefit; non-seasonal MLE stays on Nelder-Mead
+    // (the ARMA identifiability ridge makes L-BFGS oscillate there).
     //
     //   - CSS                          → Nelder-Mead
     //   - non-seasonal MLE / CSS-ML    → Nelder-Mead
-    //   - seasonal MLE / CSS-ML        → L-BFGS (NM as polish on stall)
-    //
-    // The has_seasonal switch closes the SARIMA performance gap (2-3×
-    // on the airline model) without regressing the ARMA(1,1) MLE
-    // throughput that the scaling tests measure.
+    //   - seasonal MLE / CSS-ML        → L-BFGS w/ analytic gradient
     let max_iter = 2_000 + 200 * pn;
     let use_lbfgs_for_mle = has_seasonal;
     let x_star = match opts.method {
@@ -642,7 +640,7 @@ fn arima_no_exog(y: &[f64], opts: ArimaOpts) -> Result<ArimaFit, ArimaError> {
         }
         ArimaMethod::Mle => {
             if use_lbfgs_for_mle {
-                optimize_arima_mle(&x0, &mle_obj, pn)?
+                optimize_arima_mle_with_grad(&x0, &mle_obj, &mle_obj_with_grad, pn)?
             } else {
                 let (x, _, ok) = nelder_mead::minimize(&x0, &mle_obj, max_iter, 1e-8);
                 if !ok {
@@ -658,7 +656,7 @@ fn arima_no_exog(y: &[f64], opts: ArimaOpts) -> Result<ArimaFit, ArimaError> {
                 return Err(ArimaError::OptimizationFailed { iters: max_iter });
             }
             if use_lbfgs_for_mle {
-                optimize_arima_mle(&x_css, &mle_obj, pn)?
+                optimize_arima_mle_with_grad(&x_css, &mle_obj, &mle_obj_with_grad, pn)?
             } else {
                 let (x, _, ok) =
                     nelder_mead::minimize(&x_css, &mle_obj, max_iter, 1e-8);
@@ -1510,6 +1508,120 @@ fn optimize_arima_mle<F: Fn(&[f64]) -> f64>(
         });
     }
     Ok(x_nm)
+}
+
+/// Variant of [`optimize_arima_mle`] that uses an *analytic*
+/// gradient via [`lbfgs::minimize_with_grad`]. The gradient closure
+/// `fg` must return `(NLL, ∇NLL)` at the input point; in the ARIMA
+/// MLE path that's the hand-derived Kalman gradient pre-chained
+/// through the PACF reparameterisation and convolution.
+fn optimize_arima_mle_with_grad<F, FG>(
+    x0: &[f64],
+    f: &F,
+    fg: &FG,
+    pn: usize,
+) -> Result<Vec<f64>, ArimaError>
+where
+    F: Fn(&[f64]) -> f64,
+    FG: Fn(&[f64]) -> (f64, Vec<f64>),
+{
+    let lbfgs_max = 200 + 50 * pn;
+    let nm_max = 2_000 + 200 * pn;
+    let (x_lbfgs, _f_lb, lb_ok) = lbfgs::minimize_with_grad(x0, f, fg, lbfgs_max, 1e-6);
+    if lb_ok {
+        return Ok(x_lbfgs);
+    }
+    let (x_nm, _f_nm, nm_ok) = nelder_mead::minimize(&x_lbfgs, f, nm_max, 1e-8);
+    if !nm_ok {
+        return Err(ArimaError::OptimizationFailed {
+            iters: lbfgs_max + nm_max,
+        });
+    }
+    Ok(x_nm)
+}
+
+/// PACF-space parameter vector → (total_ar, total_ma) for use as
+/// Kalman state-space inputs. Same chain the MLE objective runs;
+/// pulled out so the analytic-gradient code can finite-difference
+/// it (cheap polynomial path) and feed the resulting per-parameter
+/// `∂(T, R)` sensitivities into the analytic Kalman gradient.
+fn pacf_x_to_total_poly(
+    x: &[f64],
+    p: usize,
+    big_p: usize,
+    q: usize,
+    big_q: usize,
+    m: usize,
+) -> (Vec<f64>, Vec<f64>) {
+    let (phi, phi_s, theta, theta_s) = unpack_full(x, p, big_p, q, big_q);
+    let total_ar = convolve_ar(&phi, &phi_s, m);
+    let total_ma = convolve_ma(&theta, &theta_s, m);
+    (total_ar, total_ma)
+}
+
+/// Compute the MLE objective and its analytic gradient at `x`
+/// (PACF-space parameters, no exogenous coefficients).
+///
+/// The Kalman ∂NLL/∂(T, R) part is hand-derived (Koopman-style
+/// forward sensitivity propagation through the filter). The chain
+/// rule from PACF-space parameters down to `(T, R)` runs through
+/// `pacf_to_*_poly` (Durbin-Levinson) and `convolve_*` — both
+/// cheap polynomial maps. We finite-difference *that* chain (free
+/// in comparison to a Kalman pass) and feed the resulting
+/// `∂(T, R)/∂x_i` directions into the analytic Kalman gradient.
+fn mle_value_and_grad(
+    x: &[f64],
+    w: &[f64],
+    p: usize,
+    big_p: usize,
+    q: usize,
+    big_q: usize,
+    m: usize,
+) -> (f64, Vec<f64>) {
+    let n_pacf = x.len();
+    let (total_ar, total_ma) = pacf_x_to_total_poly(x, p, big_p, q, big_q, m);
+    if n_pacf == 0 {
+        return (
+            kalman::concentrated_neg_loglik(w, &total_ar, &total_ma),
+            Vec::new(),
+        );
+    }
+    let total_ar_len = total_ar.len();
+    let total_ma_len = total_ma.len();
+    let r = total_ar_len.max(total_ma_len + 1).max(1);
+
+    // ∂T column 0 and full ∂R per parameter, via central differences
+    // on the cheap pacf→poly chain. The Kalman primitive exploits the
+    // column-0 sparsity of ∂T to keep the per-step sensitivity update
+    // at O(r²) — only the unavoidable `T · ∂P_upd · Tᵀ` stays O(r³).
+    let h = 1e-6f64;
+    let mut dt_col0_stack: Vec<Vec<f64>> = vec![vec![0.0; r]; n_pacf];
+    let mut dr_stack: Vec<Vec<f64>> = vec![vec![0.0; r]; n_pacf];
+    let mut x_buf = x.to_vec();
+    for i in 0..n_pacf {
+        let orig = x_buf[i];
+        let step = h * (1.0 + orig.abs());
+        x_buf[i] = orig + step;
+        let (tar_p, tma_p) = pacf_x_to_total_poly(&x_buf, p, big_p, q, big_q, m);
+        x_buf[i] = orig - step;
+        let (tar_m, tma_m) = pacf_x_to_total_poly(&x_buf, p, big_p, q, big_q, m);
+        x_buf[i] = orig;
+        let inv_2h = 1.0 / (2.0 * step);
+        for k in 0..total_ar_len.min(r) {
+            dt_col0_stack[i][k] = (tar_p[k] - tar_m[k]) * inv_2h;
+        }
+        for k in 0..total_ma_len.min(r.saturating_sub(1)) {
+            dr_stack[i][k + 1] = (tma_p[k] - tma_m[k]) * inv_2h;
+        }
+    }
+
+    kalman::concentrated_nll_and_grad_with_stacks(
+        w,
+        &total_ar,
+        &total_ma,
+        &dt_col0_stack,
+        &dr_stack,
+    )
 }
 
 fn hannan_rissanen_seed(w: &[f64], p: usize, q: usize) -> Result<(Vec<f64>, Vec<f64>), ArimaError> {

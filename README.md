@@ -517,16 +517,18 @@ code, roughly ordered by user-visible impact:
 
 ### ARIMA / SARIMA
 
-- **Optimiser tuning for the MLE path.** Done in two stages so far:
-  Nelder-Mead is the universal default; for seasonal models the
-  L-BFGS-with-strong-Wolfe path (`src/tsa/arima/lbfgs.rs`) kicks in
-  and cuts SARIMA airline fits roughly in half. Remaining work:
-  closing the remaining ~2× SARIMA gap to R's `arima` (mature
-  Fortran), and improving the non-seasonal CSS-ML throughput where R
-  is also faster at large n. Likely paths: cubic-interpolation
-  enhancement to the line search (More-Thuente proper, not just
-  bisection-zoom), or analytic gradients to skip the `2n+1`-feval
-  finite-difference pass per L-BFGS iteration.
+- **Optimiser tuning for the MLE path.** Done in three stages:
+  Nelder-Mead default; L-BFGS-with-strong-Wolfe path for seasonal
+  models (`src/tsa/arima/lbfgs.rs`); and now an **analytic Kalman
+  gradient** (Koopman-style forward sensitivity propagation through
+  the filter, exploiting column-0 sparsity of `∂T` in ARMA companion
+  form) feeding `lbfgs::minimize_with_grad`. Net SARIMA speedup so
+  far: ~2× vs the original NM-only baseline, ~10 % on top of the
+  central-difference L-BFGS that preceded it. Remaining work: closing
+  the residual ~2.5× SARIMA gap to R's `arima` (mature Fortran).
+  Likely paths from here: cubic-interpolation line search (More-
+  Thuente proper, not just bisection-zoom), or chasing the `T · ∂P_upd
+  · Tᵀ` step that's still O(r³) per parameter.
 - ~~**Joint ARIMAX MLE.**~~ Done. `arima_with_exog` now fits
   `(β₀, β, φ, Φ, θ, Θ)` jointly against one likelihood, same approach
   R's `arima(xreg=)` and statsmodels' SARIMAX take. Two-stage seed

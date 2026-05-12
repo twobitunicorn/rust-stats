@@ -111,17 +111,21 @@ impl ArmaSs {
     }
 
     /// Kalman filter forward pass that *also* propagates sensitivities
-    /// of `(α_t, P_t)` with respect to each parameter in the
-    /// `dt_stack` / `dr_stack` — one entry per parameter. Returns the
+    /// of `(α_t, P_t)` with respect to each parameter. `dt_col0_stack[i]`
+    /// is the **column 0** of `∂T/∂param_i` — for ARMA companion-form
+    /// state-spaces all `∂T` entries outside column 0 are zero, so we
+    /// only store the column and exploit the sparsity in the inner
+    /// products (`∂T · M` and `M · ∂Tᵀ` both become O(r²) instead of
+    /// O(r³)). `dr_stack[i]` is the full `∂R/∂param_i`. Returns the
     /// usual `(Σ v²/F, Σ log F)` plus their gradients.
     fn filter_grad_inner(
         &self,
         y: &[f64],
-        dt_stack: &[Vec<f64>],
+        dt_col0_stack: &[Vec<f64>],
         dr_stack: &[Vec<f64>],
     ) -> (f64, f64, Vec<f64>, Vec<f64>) {
         let r = self.r;
-        let n_params = dt_stack.len();
+        let n_params = dt_col0_stack.len();
         debug_assert_eq!(dr_stack.len(), n_params);
 
         let p0 = self.lyapunov_p0();
@@ -130,7 +134,7 @@ impl ArmaSs {
 
         // Per-parameter sensitivities (initial: ∂P_0, ∂α_0 = 0).
         let mut da_stack: Vec<Vec<f64>> = vec![vec![0.0; r]; n_params];
-        let mut dp_stack: Vec<Vec<f64>> = self.lyapunov_p0_grad(&p0, dt_stack, dr_stack);
+        let mut dp_stack: Vec<Vec<f64>> = self.lyapunov_p0_grad(&p0, dt_col0_stack, dr_stack);
 
         let rrt: Vec<f64> = (0..r * r)
             .map(|k| self.r_vec[k / r] * self.r_vec[k % r])
@@ -153,6 +157,13 @@ impl ArmaSs {
         let mut da_upd = vec![0.0f64; r];
         let mut dp_upd = vec![0.0f64; r * r];
 
+        // Scratch buffers for the rank-1 ∂T contributions and the
+        // *shared* main Kalman intermediate that all per-parameter
+        // sensitivities reuse.
+        let mut t_p_upd = vec![0.0f64; r * r]; // T · P_upd, shared
+        let mut t_p_upd_row0 = vec![0.0f64; r]; // its row 0
+        let mut t_p_upd_col0 = vec![0.0f64; r]; // its column 0
+
         for &y_t in y {
             let v = y_t - a[0];
             let f = p_mat[0];
@@ -174,34 +185,38 @@ impl ArmaSs {
                 }
             }
 
-            // Per-parameter sensitivity update.
+            // Pre-compute the shared T · P_upd (used both by the main
+            // predict step and by every per-parameter sensitivity).
+            mat_mul(&self.t_matrix, &p_upd, &mut t_p_upd, r, r, r);
+            for j in 0..r {
+                t_p_upd_row0[j] = t_p_upd[j];
+                t_p_upd_col0[j] = t_p_upd[j * r];
+            }
+
+            // Per-parameter sensitivity update — all O(r²) given the
+            // column-0 sparsity of ∂T except the T · ∂P_upd · Tᵀ term,
+            // which has no exploitable structure.
+            let f2 = f * f;
             for ip in 0..n_params {
                 let da = &mut da_stack[ip];
                 let dp = &mut dp_stack[ip];
-                let dt = &dt_stack[ip];
+                let dt_col0 = &dt_col0_stack[ip];
                 let dr = &dr_stack[ip];
 
-                // ∂v = -∂α[0]; ∂F = ∂P[0,0]
                 let dv = -da[0];
                 let df = dp[0];
 
-                // ∂K_i = (∂P[i,0]·F − P[i,0]·∂F) / F²
-                let f2 = f * f;
                 for i in 0..r {
                     dk[i] = (dp[i * r] * f - p_mat[i * r] * df) / f2;
                 }
 
-                // ∂(v²/F) = (2 v ∂v F − v² ∂F) / F²
                 d_sum_v2_f[ip] += (2.0 * v * dv * f - v * v * df) / f2;
-                // ∂(log F) = ∂F / F
                 d_sum_log_f[ip] += df / f;
 
-                // ∂α_upd = ∂α + ∂K·v + K·∂v
                 for i in 0..r {
                     da_upd[i] = da[i] + dk[i] * v + k_gain[i] * dv;
                 }
 
-                // ∂P_upd = ∂P − ∂K·F·Kᵀ − K·∂F·Kᵀ − K·F·∂Kᵀ
                 for i in 0..r {
                     for j in 0..r {
                         dp_upd[i * r + j] = dp[i * r + j]
@@ -212,29 +227,57 @@ impl ArmaSs {
                 }
 
                 // ∂α_{t+1} = ∂T · α_upd + T · ∂α_upd
-                mat_vec(dt, &a_upd, da, r, r);
+                // ∂T · α_upd: only column 0 of ∂T nonzero ⇒ result =
+                // dt_col0 · α_upd[0]. So:
+                for i in 0..r {
+                    da[i] = dt_col0[i] * a_upd[0];
+                }
                 mat_vec_add(&self.t_matrix, &da_upd, da, r, r);
 
-                // ∂P_{t+1} = ∂T · P_upd · Tᵀ
-                //          + T · ∂P_upd · Tᵀ
-                //          + T · P_upd · ∂Tᵀ
-                //          + ∂R · Rᵀ + R · ∂Rᵀ
-                mat_mul(dt, &p_upd, &mut work_a, r, r, r);
-                mat_mul_b_transpose(&work_a, &self.t_matrix, dp, r, r, r);
-
+                // ∂P_{t+1} =
+                //   ∂T · P_upd · Tᵀ                (rank-1 via dt_col0)
+                // + T · ∂P_upd · Tᵀ                (dense; the only O(r³) cost)
+                // + T · P_upd · ∂Tᵀ                (rank-1 via dt_col0)
+                // + ∂R · Rᵀ + R · ∂Rᵀ              (rank-1 outer)
+                //
+                // ∂T · P_upd has row i = dt_col0[i] · (row 0 of P_upd).
+                // (∂T · P_upd) · Tᵀ at (i, j) = dt_col0[i] ·
+                //   (row 0 of P_upd · row j of T)
+                //   = dt_col0[i] · w_j, where w = T · (row 0 of P_upd)ᵀ.
+                // But w is exactly column 0 of T · P_upd = t_p_upd_col0. Wait:
+                //   t_p_upd[a, b] = sum_k T[a, k] · P_upd[k, b].
+                //   row 0 of T·P_upd = column 0 of (T·P_upd)ᵀ, NOT what we want.
+                // The thing we want: for each j, sum_k P_upd[0, k] · T[j, k].
+                //   = sum_k T[j, k] · P_upd[0, k]
+                //   = (T · P_upd^T)[j, 0]. We don't have P_upd^T cached.
+                // Easier: compute on the fly — O(r²).
+                let mut w_dt_p_t = vec![0.0f64; r];
+                for j in 0..r {
+                    let mut s = 0.0f64;
+                    for k in 0..r {
+                        s += self.t_matrix[j * r + k] * p_upd[k];
+                    }
+                    w_dt_p_t[j] = s;
+                }
+                for i in 0..r {
+                    for j in 0..r {
+                        dp[i * r + j] = dt_col0[i] * w_dt_p_t[j];
+                    }
+                }
+                // T · ∂P_upd · Tᵀ — dense, unavoidable O(r³).
                 mat_mul(&self.t_matrix, &dp_upd, &mut work_a, r, r, r);
                 mat_mul_b_transpose(&work_a, &self.t_matrix, &mut work_b, r, r, r);
                 for k in 0..r * r {
                     dp[k] += work_b[k];
                 }
-
-                mat_mul(&self.t_matrix, &p_upd, &mut work_a, r, r, r);
-                mat_mul_b_transpose(&work_a, dt, &mut work_b, r, r, r);
-                for k in 0..r * r {
-                    dp[k] += work_b[k];
+                // T · P_upd · ∂Tᵀ: T · P_upd is cached in `t_p_upd`.
+                // (t_p_upd · ∂Tᵀ)[i, j] = sum_k t_p_upd[i, k] · ∂T[j, k]
+                //   = t_p_upd[i, 0] · dt_col0[j].
+                for i in 0..r {
+                    for j in 0..r {
+                        dp[i * r + j] += t_p_upd_col0[i] * dt_col0[j];
+                    }
                 }
-
-                // ∂R·Rᵀ + R·∂Rᵀ (outer sum)
                 for i in 0..r {
                     for j in 0..r {
                         dp[i * r + j] += dr[i] * self.r_vec[j] + self.r_vec[i] * dr[j];
@@ -243,51 +286,78 @@ impl ArmaSs {
             }
 
             // Predict next: a ← T · a_upd; P ← T · P_upd · Tᵀ + R Rᵀ.
+            // (T · P_upd is already in t_p_upd; finish with · Tᵀ.)
             mat_vec(&self.t_matrix, &a_upd, &mut a, r, r);
-            mat_mul(&self.t_matrix, &p_upd, &mut work_a, r, r, r);
-            mat_mul_b_transpose(&work_a, &self.t_matrix, &mut work_b, r, r, r);
+            mat_mul_b_transpose(&t_p_upd, &self.t_matrix, &mut work_b, r, r, r);
             for k in 0..r * r {
                 p_mat[k] = work_b[k] + rrt[k];
             }
+            // Silence unused warning from work_a (we kept it for the
+            // T · ∂P_upd path).
+            let _ = &work_a;
         }
         (sum_v2_f, sum_log_f, d_sum_v2_f, d_sum_log_f)
     }
 
     /// Solve `∂P = T · ∂P · Tᵀ + G` for each parameter, where the
     /// forcing `G = ∂T·P·Tᵀ + T·P·∂Tᵀ + ∂R·Rᵀ + R·∂Rᵀ` comes from
-    /// differentiating the steady-state Lyapunov equation.
+    /// differentiating the steady-state Lyapunov equation. `dt_col0`
+    /// stores only column 0 of `∂T` (the rest is zero for ARMA
+    /// companion form).
     fn lyapunov_p0_grad(
         &self,
         p0: &[f64],
-        dt_stack: &[Vec<f64>],
+        dt_col0_stack: &[Vec<f64>],
         dr_stack: &[Vec<f64>],
     ) -> Vec<Vec<f64>> {
         let r = self.r;
-        let n_params = dt_stack.len();
+        let n_params = dt_col0_stack.len();
         let mut out = Vec::with_capacity(n_params);
         let mut work_a = vec![0.0f64; r * r];
         let mut work_b = vec![0.0f64; r * r];
         for i in 0..n_params {
-            let dt = &dt_stack[i];
+            let dt_col0 = &dt_col0_stack[i];
             let dr = &dr_stack[i];
-            // G = ∂T·P·Tᵀ + T·P·∂Tᵀ + ∂R·Rᵀ + R·∂Rᵀ
+            // G = ∂T·P·Tᵀ + T·P·∂Tᵀ + ∂R·Rᵀ + R·∂Rᵀ.
+            // Note: ∂T·P has rows equal to dt_col0[i] · (row 0 of P);
+            // (∂T·P)·Tᵀ likewise factors. Each is rank-1 in the row-0
+            // pattern, so we compute it in O(r²) instead of O(r³).
             let mut g = vec![0.0f64; r * r];
-            mat_mul(dt, p0, &mut work_a, r, r, r);
-            mat_mul_b_transpose(&work_a, &self.t_matrix, &mut work_b, r, r, r);
-            for k in 0..r * r {
-                g[k] += work_b[k];
+            // ∂T · P: row i = dt_col0[i] · (row 0 of P).
+            // Then ·Tᵀ: column j of result = (∂T·P) · (row j of T)ᵀ.
+            //          (row i of (∂T·P)) · (column j of Tᵀ)
+            //          = (dt_col0[i] · row0(P)) · (column j of Tᵀ)
+            //          = dt_col0[i] · (row0(P) · column j of Tᵀ)
+            //          = dt_col0[i] · w_b[j]
+            // where w_b[j] = row0(P) · column j of Tᵀ.
+            // First build w_b (length r): w_b[j] = sum_k P[0,k] * T[j,k].
+            let mut wb = vec![0.0f64; r];
+            for j in 0..r {
+                let mut s = 0.0f64;
+                for k in 0..r {
+                    s += p0[k] * self.t_matrix[j * r + k];
+                }
+                wb[j] = s;
             }
-            mat_mul(&self.t_matrix, p0, &mut work_a, r, r, r);
-            mat_mul_b_transpose(&work_a, dt, &mut work_b, r, r, r);
-            for k in 0..r * r {
-                g[k] += work_b[k];
+            for ii in 0..r {
+                for jj in 0..r {
+                    g[ii * r + jj] += dt_col0[ii] * wb[jj];
+                }
+            }
+            // T·P·∂Tᵀ — the transpose of the above (G is symmetric).
+            for ii in 0..r {
+                for jj in 0..r {
+                    g[ii * r + jj] += dt_col0[jj] * wb[ii];
+                }
             }
             for ii in 0..r {
                 for jj in 0..r {
                     g[ii * r + jj] += dr[ii] * self.r_vec[jj] + self.r_vec[ii] * dr[jj];
                 }
             }
-            // Iterate ∂P = T·∂P·Tᵀ + G.
+            // Iterate ∂P = T·∂P·Tᵀ + G (these mat_muls are still O(r³),
+            // but `T` is dense in general so we can't avoid them here —
+            // and Lyapunov convergence is fast for typical ARMA T).
             let mut dp = g.clone();
             for _ in 0..500 {
                 mat_mul(&self.t_matrix, &dp, &mut work_a, r, r, r);
@@ -437,10 +507,10 @@ pub(super) fn concentrated_nll_and_grad_with_stacks(
     y: &[f64],
     total_ar: &[f64],
     total_ma: &[f64],
-    dt_stack: &[Vec<f64>],
+    dt_col0_stack: &[Vec<f64>],
     dr_stack: &[Vec<f64>],
 ) -> (f64, Vec<f64>) {
-    let n_params = dt_stack.len();
+    let n_params = dt_col0_stack.len();
     debug_assert_eq!(dr_stack.len(), n_params);
     if n_params == 0 {
         return (concentrated_neg_loglik(y, total_ar, total_ma), Vec::new());
@@ -448,7 +518,7 @@ pub(super) fn concentrated_nll_and_grad_with_stacks(
     let ss = ArmaSs::build(total_ar, total_ma);
 
     let (sum_v2_f, sum_log_f, d_sum_v2_f, d_sum_log_f) =
-        ss.filter_grad_inner(y, dt_stack, dr_stack);
+        ss.filter_grad_inner(y, dt_col0_stack, dr_stack);
 
     let n = y.len() as f64;
     if !sum_v2_f.is_finite() || sum_v2_f <= 0.0 {
@@ -485,15 +555,16 @@ pub(super) fn concentrated_nll_and_grad(
     }
     let ss = ArmaSs::build(phi, theta);
     let r = ss.r;
-    let mut dt_stack: Vec<Vec<f64>> = vec![vec![0.0; r * r]; n_params];
+    let mut dt_col0_stack: Vec<Vec<f64>> = vec![vec![0.0; r]; n_params];
     let mut dr_stack: Vec<Vec<f64>> = vec![vec![0.0; r]; n_params];
     for j in 0..p {
-        dt_stack[j][j * r] = 1.0;
+        // ∂T/∂φ_{j+1} = unit at row j, column 0 → dt_col0[j] = 1.
+        dt_col0_stack[j][j] = 1.0;
     }
     for j in 0..q {
         dr_stack[p + j][j + 1] = 1.0;
     }
-    concentrated_nll_and_grad_with_stacks(y, phi, theta, &dt_stack, &dr_stack)
+    concentrated_nll_and_grad_with_stacks(y, phi, theta, &dt_col0_stack, &dr_stack)
 }
 
 // ----------------------------------------------------------------------

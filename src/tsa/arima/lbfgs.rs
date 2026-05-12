@@ -115,6 +115,199 @@ where
     (x, fx, false)
 }
 
+/// L-BFGS with a *caller-supplied* value-and-gradient closure. `fg(x)`
+/// must return `(f(x), ∇f(x))`. Use this when you have an analytic
+/// gradient: it skips the `2·n + 1`-feval central-difference pass that
+/// `minimize` does each time it needs a gradient.
+///
+/// `f` is also taken separately for the cheap trial points during the
+/// line search — most line search trials are rejected on the Armijo
+/// test alone and never need a gradient.
+pub fn minimize_with_grad<F, FG>(
+    x0: &[f64],
+    f: &F,
+    fg: &FG,
+    max_iter: usize,
+    grad_tol: f64,
+) -> (Vec<f64>, f64, bool)
+where
+    F: Fn(&[f64]) -> f64,
+    FG: Fn(&[f64]) -> (f64, Vec<f64>),
+{
+    let n = x0.len();
+    if n == 0 {
+        return (Vec::new(), f(x0), true);
+    }
+
+    let mut x = x0.to_vec();
+    let (mut fx, mut grad) = fg(&x);
+    if !fx.is_finite() || grad.iter().any(|g| !g.is_finite()) {
+        return (x, fx, false);
+    }
+
+    let mut s_hist: Vec<Vec<f64>> = Vec::with_capacity(HISTORY_SIZE);
+    let mut y_hist: Vec<Vec<f64>> = Vec::with_capacity(HISTORY_SIZE);
+    let mut rho_hist: Vec<f64> = Vec::with_capacity(HISTORY_SIZE);
+
+    for _ in 0..max_iter {
+        let gnorm: f64 = grad.iter().map(|g| g * g).sum::<f64>().sqrt();
+        if gnorm < grad_tol {
+            return (x, fx, true);
+        }
+
+        let mut direction = two_loop(&grad, &s_hist, &y_hist, &rho_hist);
+        let g_dot_d: f64 = grad.iter().zip(&direction).map(|(g, d)| g * d).sum();
+        let descent = g_dot_d.is_finite() && g_dot_d < 0.0;
+        if !descent {
+            direction = grad.iter().map(|g| -g).collect();
+        }
+        let alpha_init = if s_hist.is_empty() {
+            let dir_norm: f64 = direction.iter().map(|d| d * d).sum::<f64>().sqrt();
+            if dir_norm > 1.0 { 1.0 / dir_norm } else { 1.0 }
+        } else {
+            1.0
+        };
+        let g_dot_d: f64 = grad.iter().zip(&direction).map(|(g, d)| g * d).sum();
+        let ls = strong_wolfe_with_grad(f, fg, &x, fx, &direction, g_dot_d, alpha_init);
+        let Some((_alpha, x_new, fx_new, grad_new)) = ls else {
+            return (x, fx, false);
+        };
+
+        let s: Vec<f64> = x_new.iter().zip(&x).map(|(a, b)| a - b).collect();
+        let y: Vec<f64> = grad_new.iter().zip(&grad).map(|(a, b)| a - b).collect();
+        let sy: f64 = s.iter().zip(&y).map(|(a, b)| a * b).sum();
+        if sy > 1e-10 {
+            if s_hist.len() == HISTORY_SIZE {
+                s_hist.remove(0);
+                y_hist.remove(0);
+                rho_hist.remove(0);
+            }
+            s_hist.push(s);
+            y_hist.push(y);
+            rho_hist.push(1.0 / sy);
+        }
+
+        x = x_new;
+        fx = fx_new;
+        grad = grad_new;
+    }
+
+    (x, fx, false)
+}
+
+/// Strong-Wolfe line search using a separate `(f, fg)` pair: `f`
+/// for cheap function-only trials, `fg` only when a gradient is
+/// needed (Wolfe curvature check or accepted step).
+#[allow(clippy::too_many_arguments)]
+fn strong_wolfe_with_grad<F, FG>(
+    f: &F,
+    fg: &FG,
+    x: &[f64],
+    fx: f64,
+    direction: &[f64],
+    g_dot_d: f64,
+    alpha_init: f64,
+) -> Option<(f64, Vec<f64>, f64, Vec<f64>)>
+where
+    F: Fn(&[f64]) -> f64,
+    FG: Fn(&[f64]) -> (f64, Vec<f64>),
+{
+    if g_dot_d >= 0.0 {
+        return None;
+    }
+    let n = x.len();
+    let mut alpha_prev = 0.0_f64;
+    let mut fx_prev = fx;
+    let mut alpha = alpha_init.min(ALPHA_MAX);
+
+    for i in 0..MAX_LINE_SEARCH_OUTER {
+        let mut x_try = vec![0.0; n];
+        for j in 0..n {
+            x_try[j] = x[j] + alpha * direction[j];
+        }
+        let fx_try = f(&x_try);
+        if !fx_try.is_finite()
+            || fx_try > fx + C1 * alpha * g_dot_d
+            || (i > 0 && fx_try >= fx_prev)
+        {
+            return zoom_with_grad(
+                f, fg, x, fx, direction, g_dot_d, alpha_prev, alpha, fx_prev, fx_try,
+            );
+        }
+        let (_, grad_try) = fg(&x_try);
+        let g_dot_d_try: f64 = grad_try.iter().zip(direction).map(|(g, d)| g * d).sum();
+        if g_dot_d_try.abs() <= -C2 * g_dot_d {
+            return Some((alpha, x_try, fx_try, grad_try));
+        }
+        if g_dot_d_try >= 0.0 {
+            return zoom_with_grad(
+                f, fg, x, fx, direction, g_dot_d, alpha, alpha_prev, fx_try, fx_prev,
+            );
+        }
+        alpha_prev = alpha;
+        fx_prev = fx_try;
+        let new_alpha = (alpha * 2.0).min(ALPHA_MAX);
+        if (new_alpha - alpha).abs() < ALPHA_MIN_RESOLUTION {
+            return None;
+        }
+        alpha = new_alpha;
+    }
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
+fn zoom_with_grad<F, FG>(
+    f: &F,
+    fg: &FG,
+    x: &[f64],
+    fx: f64,
+    direction: &[f64],
+    g_dot_d: f64,
+    mut alpha_lo: f64,
+    mut alpha_hi: f64,
+    mut fx_lo: f64,
+    mut _fx_hi: f64,
+) -> Option<(f64, Vec<f64>, f64, Vec<f64>)>
+where
+    F: Fn(&[f64]) -> f64,
+    FG: Fn(&[f64]) -> (f64, Vec<f64>),
+{
+    let n = x.len();
+    for _ in 0..MAX_LINE_SEARCH_ZOOM {
+        let alpha = 0.5 * (alpha_lo + alpha_hi);
+        if (alpha_hi - alpha_lo).abs() < ALPHA_MIN_RESOLUTION {
+            let mut x_try = vec![0.0; n];
+            for j in 0..n {
+                x_try[j] = x[j] + alpha_lo * direction[j];
+            }
+            let (fx_try, grad_try) = fg(&x_try);
+            return Some((alpha_lo, x_try, fx_try, grad_try));
+        }
+        let mut x_try = vec![0.0; n];
+        for j in 0..n {
+            x_try[j] = x[j] + alpha * direction[j];
+        }
+        let fx_try = f(&x_try);
+        if !fx_try.is_finite() || fx_try > fx + C1 * alpha * g_dot_d || fx_try >= fx_lo {
+            alpha_hi = alpha;
+            _fx_hi = fx_try;
+        } else {
+            let (_, grad_try) = fg(&x_try);
+            let g_dot_d_try: f64 = grad_try.iter().zip(direction).map(|(g, d)| g * d).sum();
+            if g_dot_d_try.abs() <= -C2 * g_dot_d {
+                return Some((alpha, x_try, fx_try, grad_try));
+            }
+            if g_dot_d_try * (alpha_hi - alpha_lo) >= 0.0 {
+                alpha_hi = alpha_lo;
+                _fx_hi = fx_lo;
+            }
+            alpha_lo = alpha;
+            fx_lo = fx_try;
+        }
+    }
+    None
+}
+
 /// Central-difference gradient. `x` is borrowed mutably and restored
 /// in-place so each per-coordinate perturbation is allocation-free.
 fn numerical_gradient<F: Fn(&[f64]) -> f64>(f: &F, x: &mut [f64]) -> Vec<f64> {
@@ -345,6 +538,43 @@ mod tests {
             assert_relative_eq!(*xi, i as f64, max_relative = 1e-4);
         }
         assert!(fmin < 1e-6);
+    }
+
+    #[test]
+    fn analytic_gradient_path_matches_central_difference_path() {
+        // Quadratic — both paths should converge to the same minimum.
+        let f = |v: &[f64]| (v[0] - 3.0).powi(2) + (v[1] + 2.0).powi(2);
+        let fg = |v: &[f64]| {
+            let val = (v[0] - 3.0).powi(2) + (v[1] + 2.0).powi(2);
+            let grad = vec![2.0 * (v[0] - 3.0), 2.0 * (v[1] + 2.0)];
+            (val, grad)
+        };
+        let (x, fmin, ok) = minimize_with_grad(&[0.0, 0.0], &f, &fg, 100, 1e-8);
+        assert!(ok);
+        assert_relative_eq!(x[0], 3.0, max_relative = 1e-4);
+        assert_relative_eq!(x[1], -2.0, max_relative = 1e-4);
+        assert!(fmin < 1e-8);
+    }
+
+    #[test]
+    fn analytic_gradient_rosenbrock() {
+        let f = |v: &[f64]| {
+            let a = 1.0 - v[0];
+            let b = v[1] - v[0] * v[0];
+            a * a + 100.0 * b * b
+        };
+        let fg = |v: &[f64]| {
+            let a = 1.0 - v[0];
+            let b = v[1] - v[0] * v[0];
+            let val = a * a + 100.0 * b * b;
+            let grad = vec![-2.0 * a - 400.0 * v[0] * b, 200.0 * b];
+            (val, grad)
+        };
+        let (x, fmin, ok) = minimize_with_grad(&[-1.2, 1.0], &f, &fg, 500, 1e-6);
+        assert!(ok, "Rosenbrock (analytic) failed");
+        assert_relative_eq!(x[0], 1.0, max_relative = 1e-4);
+        assert_relative_eq!(x[1], 1.0, max_relative = 1e-4);
+        assert!(fmin < 1e-8);
     }
 
     #[test]

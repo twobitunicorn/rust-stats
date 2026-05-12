@@ -158,6 +158,47 @@ fn recovers_ar1_truth() {
 }
 
 #[test]
+fn analytic_pacf_grad_matches_central_difference() {
+    // SARIMA(0, 0, 1)(0, 0, 1)[12] in PACF space. We construct a
+    // length-200 simulated series and verify mle_value_and_grad's
+    // gradient matches a tight central-difference baseline.
+    use super::mle_value_and_grad;
+
+    let y = simulate_arma(300, &[], &[0.4], 1.0, 0xABCD);
+    let m: usize = 12;
+    let p = 0usize;
+    let big_p = 0usize;
+    let q = 1usize;
+    let big_q = 1usize;
+
+    let x = vec![0.2_f64, -0.3]; // PACF-space params: theta, theta_s
+    let (nll, grad) = mle_value_and_grad(&x, &y, p, big_p, q, big_q, m);
+    assert!(nll.is_finite());
+
+    let h = 1e-5;
+    let mle_obj = |xv: &[f64]| -> f64 {
+        let (phi, phi_s, theta, theta_s) = super::unpack_full(xv, p, big_p, q, big_q);
+        let total_ar = super::convolve_ar(&phi, &phi_s, m);
+        let total_ma = super::convolve_ma(&theta, &theta_s, m);
+        super::kalman::concentrated_neg_loglik(&y, &total_ar, &total_ma)
+    };
+    for i in 0..x.len() {
+        let mut xp = x.clone();
+        xp[i] += h;
+        let f_plus = mle_obj(&xp);
+        let mut xm = x.clone();
+        xm[i] -= h;
+        let f_minus = mle_obj(&xm);
+        let g_fd = (f_plus - f_minus) / (2.0 * h);
+        assert!(
+            (grad[i] - g_fd).abs() < 1e-3 * (1.0 + g_fd.abs()),
+            "grad[{i}] = {} but FD gives {g_fd}",
+            grad[i],
+        );
+    }
+}
+
+#[test]
 fn fitted_values_have_no_zero_warmup() {
     // R's `fitted(arima)` returns Kalman one-step-ahead predictions
     // at every step, with no zero warm-up at the start. Make sure
