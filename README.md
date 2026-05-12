@@ -389,11 +389,12 @@ cost.
 | auto_arima                      | 720   |   **97.4** |    7 019.4 |    633.8 |
 | auto_arima                      | 2 880 |  **255.3** |    8 248.6 |  1 410.5 |
 | auto_arima [m=12 airline model] | 144   |  **102.3** |  174 530.6 | 25 848.3 |
-| auto_arima [m=12 airline model] | 288   |  **134.7** |        —   | 70 536.5 |
+| auto_arima [m=12 airline model] | 288   |  **134.7** |  374 913.1 | 70 536.5 |
 
-(All times in ms, median of 1–10 iters. Rust MLE at airline n=288
-didn't finish in reasonable wall-clock — our Nelder-Mead × iterative
-Lyapunov × stepwise candidates is a slow inner triple.)
+(All times in ms, median of 1–10 iters. The 6-minute rust MLE cell at
+airline n=288 is honest: our Nelder-Mead × iterative Lyapunov ×
+stepwise candidates is a slow inner triple on a 13-dimensional state
+space.)
 
 - **rust-stats CSS (default) vs pmdarima**: rust-stats is **6–525×
   faster** end-to-end on `auto_arima`, with the biggest multiplier on
