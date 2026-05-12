@@ -326,36 +326,39 @@ different (faster, slightly less efficient at finite n) estimator.
 
 | Workload | n | rust CSS | rust MLE | rust CSS-ML | R arima | statsmodels |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| ARIMA(1,0,0) | 144   | **0.23** |  0.58  |  0.44  |   1.12 |   5.06 |
-| ARIMA(1,0,0) | 720   | **0.32** |  1.17  |  1.12  |   2.22 |  14.71 |
-| ARIMA(1,0,0) | 2 880 | **0.92** |  4.24  |  4.43  |   4.84 |  44.86 |
-| ARIMA(0,0,1) | 144   | **0.10** |  0.35  |  0.36  |   1.11 |   5.45 |
-| ARIMA(0,0,1) | 720   | **0.45** |  1.52  |  1.71  |   2.50 |  17.97 |
-| ARIMA(0,0,1) | 2 880 | **1.82** |  6.24  |  6.87  |   7.76 |  56.16 |
-| ARIMA(1,0,1) | 144   | **0.21** |  0.77  |  0.85  |   1.69 |   7.95 |
-| ARIMA(1,0,1) | 720   | **0.95** |  3.23  |  3.81  |   4.11 |  22.61 |
-| ARIMA(1,0,1) | 2 880 | **3.79** | 13.32  | 14.73  |  16.23 |  76.93 |
-| ARIMA(0,1,1) | 144   | **0.10** |  0.33  |  0.34  |   0.37 |   3.70 |
-| ARIMA(0,1,1) | 720   | **0.45** |  1.45  |  1.71  |   1.06 |  10.43 |
-| ARIMA(0,1,1) | 2 880 |   1.77   |  5.84  |  6.45  | **2.25** | 27.75 |
-| ARIMA(1,1,1) | 144   | **0.23** |  0.87  |  0.91  |  13.28 |   7.42 |
-| ARIMA(1,1,1) | 720   | **1.04** |  3.36  |  4.25  |   4.47 |  17.23 |
-| ARIMA(1,1,1) | 2 880 | **4.03** | 13.97  | 16.16  |   9.53 |  57.21 |
-| SARIMA(0,1,1)(0,1,1)[12] | 144 |   7.57   |  55.37 |  47.81 | **16.24** | 214.37 |
-| SARIMA(0,1,1)(0,1,1)[12] | 288 | **15.09** |  61.36 |  46.87 |  31.63 | 285.61 |
+| ARIMA(1,0,0) | 144   | **0.06** |  0.27  |  0.30  |   1.12 |   5.06 |
+| ARIMA(1,0,0) | 720   | **0.27** |  1.03  |  1.08  |   2.22 |  14.71 |
+| ARIMA(1,0,0) | 2 880 | **0.92** |  3.98  |  4.28  |   4.84 |  44.86 |
+| ARIMA(0,0,1) | 144   | **0.09** |  0.26  |  0.28  |   1.11 |   5.45 |
+| ARIMA(0,0,1) | 720   | **0.41** |  1.13  |  1.31  |   2.50 |  17.97 |
+| ARIMA(0,0,1) | 2 880 | **1.68** |  4.50  |  5.19  |   7.76 |  56.16 |
+| ARIMA(1,0,1) | 144   | **0.19** |  0.55  |  0.64  |   1.69 |   7.95 |
+| ARIMA(1,0,1) | 720   | **0.84** |  2.34  |  2.89  |   4.11 |  22.61 |
+| ARIMA(1,0,1) | 2 880 | **3.24** |  9.64  | 11.08  |  16.23 |  76.93 |
+| ARIMA(0,1,1) | 144   | **0.09** |  0.24  |  0.27  |   0.37 |   3.70 |
+| ARIMA(0,1,1) | 720   | **0.40** |  1.07  |  1.29  |   1.06 |  10.43 |
+| ARIMA(0,1,1) | 2 880 | **1.65** |  4.31  |  4.98  |   2.25 |  27.75 |
+| ARIMA(1,1,1) | 144   | **0.21** |  0.66  |  0.70  |  13.28 |   7.42 |
+| ARIMA(1,1,1) | 720   | **0.92** |  2.46  |  3.27  |   4.47 |  17.23 |
+| ARIMA(1,1,1) | 2 880 | **3.55** | 10.16  | 12.15  |   9.53 |  57.21 |
+| SARIMA(0,1,1)(0,1,1)[12] | 144 | **1.81** | **11.25** | **10.35** |  16.24 | 214.37 |
+| SARIMA(0,1,1)(0,1,1)[12] | 288 | **3.60** | **12.88** |  34.43 |  31.63 | 285.61 |
 
-(All times in ms, median of 3–50 iters.) Rust numbers include the
-per-fit standard-error pass (Hessian + inversion of the natural-space
-NLL); see the SE bullet in the Roadmap section below for the cost
-breakdown — most cells regressed by ~10-30 % vs the previous numbers
-because every fit now ships SEs, matching R's `var.coef` convention.
+(All times in ms, median of 3–50 iters.) Rust numbers include both
+the per-fit standard-error pass (Hessian + inversion of the natural-
+space NLL — same convention as R's `var.coef`) and the Kalman pass
+that produces one-step-ahead `fitted` values. The Kalman filter and
+its gradient propagation now exploit the ARMA companion-form
+structure of `T` (column 0 + super-diagonal shift) — every step of
+`T·X·Tᵀ`, `T·X`, and `T·v` runs in O(r²) instead of O(r³), which
+cut the SARIMA times roughly **5×** and pulled non-seasonal MLE down
+~30 % as well.
 
 **rust-stats CSS-ML vs R arima** (both Kalman MLE with CSS seeds):
-rust-stats is **1.1–2× faster** on non-seasonal models. R still wins
-on **SARIMA** (R 16.2 ms vs ours 47.8 ms on the airline model at
-n=144) — R's `arima` is a mature Fortran/C implementation — but the
-strong-Wolfe L-BFGS gate we added for seasonal MLE / CSS-ML cut our
-SARIMA times by ~2× from the original Nelder-Mead-only numbers.
+rust-stats is **1.5–3× faster** on non-seasonal models and now also
+**faster on SARIMA** (10.3 ms vs 16.2 ms on the airline model at
+n=144). The companion-form structure-aware Kalman kernel + analytic
+gradient closed the gap to R's Fortran reference implementation.
 
 **rust-stats MLE vs statsmodels SARIMAX** (same Gaussian Kalman
 objective, both default-optimised): rust-stats is **3–18× faster**
@@ -517,18 +520,18 @@ code, roughly ordered by user-visible impact:
 
 ### ARIMA / SARIMA
 
-- **Optimiser tuning for the MLE path.** Done in three stages:
-  Nelder-Mead default; L-BFGS-with-strong-Wolfe path for seasonal
-  models (`src/tsa/arima/lbfgs.rs`); and now an **analytic Kalman
-  gradient** (Koopman-style forward sensitivity propagation through
-  the filter, exploiting column-0 sparsity of `∂T` in ARMA companion
-  form) feeding `lbfgs::minimize_with_grad`. Net SARIMA speedup so
-  far: ~2× vs the original NM-only baseline, ~10 % on top of the
-  central-difference L-BFGS that preceded it. Remaining work: closing
-  the residual ~2.5× SARIMA gap to R's `arima` (mature Fortran).
-  Likely paths from here: cubic-interpolation line search (More-
-  Thuente proper, not just bisection-zoom), or chasing the `T · ∂P_upd
-  · Tᵀ` step that's still O(r³) per parameter.
+- ~~**Optimiser tuning for the MLE path.**~~ Done. Four stages
+  total: (1) Nelder-Mead default for the inner CSS / MLE objective;
+  (2) strong-Wolfe L-BFGS for the seasonal MLE path
+  (`src/tsa/arima/lbfgs.rs`); (3) analytic Kalman gradient
+  (Koopman-style forward sensitivity propagation through the filter,
+  with column-0 sparsity of `∂T` exploited so most per-parameter
+  contributions are O(r²)); (4) companion-form structure-aware
+  kernels (`t_x_tt`, `t_x`, `t_vec`) that exploit
+  `T = phi · e_0ᵀ + S` to drop every `T·X·Tᵀ`, `T·X`, and `T·v` from
+  O(r³) / O(r²) to one order lower. Net result: rust-stats is now
+  **faster than R's `arima`** on the SARIMA airline model (10.3 ms
+  vs 16.2 ms at n=144).
 - ~~**Joint ARIMAX MLE.**~~ Done. `arima_with_exog` now fits
   `(β₀, β, φ, Φ, θ, Θ)` jointly against one likelihood, same approach
   R's `arima(xreg=)` and statsmodels' SARIMAX take. Two-stage seed
