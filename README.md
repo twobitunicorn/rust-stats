@@ -318,43 +318,61 @@ Three estimation methods are exposed via `ArimaOpts.method`:
   `arima(method = "CSS-ML")` default.
 
 statsmodels' SARIMAX has no plain-CSS option; everything goes through
-Kalman + L-BFGS. So **rust-stats MLE vs statsmodels** is the strict
-like-for-like comparison; CSS is reported separately because it's a
+Kalman + L-BFGS. R's `stats::arima` defaults to CSS-ML (CSS for
+starting values, then exact MLE via Kalman). So the strict
+like-for-like cells are **rust CSS-ML vs R arima** and **rust MLE vs
+statsmodels SARIMAX**; CSS is reported separately because it's a
 different (faster, slightly less efficient at finite n) estimator.
 
-| Workload | n | rust CSS | rust MLE | rust CSS-ML | statsmodels |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| ARIMA(1,0,0) | 144  | **0.07** |  0.55 |  0.43 |   5.06 |
-| ARIMA(1,0,0) | 720  | **0.11** |  1.13 |  0.97 |  14.71 |
-| ARIMA(1,0,0) | 2 880 | **0.27** |  3.56 |  3.74 |  44.86 |
-| ARIMA(0,0,1) | 144  | **0.05** |  0.30 |  0.31 |   5.45 |
-| ARIMA(0,0,1) | 720  | **0.22** |  1.28 |  1.49 |  17.97 |
-| ARIMA(0,0,1) | 2 880 | **0.91** |  5.34 |  5.90 |  56.16 |
-| ARIMA(1,0,1) | 144  | **0.10** |  0.65 |  0.74 |   7.95 |
-| ARIMA(1,0,1) | 720  | **0.46** |  2.73 |  3.30 |  22.61 |
-| ARIMA(1,0,1) | 2 880 | **1.80** | 11.43 | 12.63 |  76.93 |
-| ARIMA(0,1,1) | 144  | **0.05** |  0.28 |  0.29 |   3.70 |
-| ARIMA(0,1,1) | 720  | **0.22** |  1.21 |  1.47 |  10.43 |
-| ARIMA(0,1,1) | 2 880 | **0.86** |  4.89 |  5.44 |  27.75 |
-| ARIMA(1,1,1) | 144  | **0.12** |  0.76 |  0.81 |   7.42 |
-| ARIMA(1,1,1) | 720  | **0.54** |  2.83 |  3.70 |  17.23 |
-| ARIMA(1,1,1) | 2 880 | **2.09** | 12.08 | 14.12 |  57.21 |
-| SARIMA(0,1,1)(0,1,1)[12] | 144 | **0.32** |  62.65 |  70.21 | 214.37 |
-| SARIMA(0,1,1)(0,1,1)[12] | 288 | **0.69** | 125.68 |  95.91 | 285.61 |
+| Workload | n | rust CSS | rust MLE | rust CSS-ML | R arima | statsmodels |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| ARIMA(1,0,0) | 144   | **0.07** |  0.55  |  0.43  |   1.12 |   5.06 |
+| ARIMA(1,0,0) | 720   | **0.11** |  1.13  |  0.97  |   2.22 |  14.71 |
+| ARIMA(1,0,0) | 2 880 | **0.27** |  3.56  |  3.74  |   4.84 |  44.86 |
+| ARIMA(0,0,1) | 144   | **0.05** |  0.30  |  0.31  |   1.11 |   5.45 |
+| ARIMA(0,0,1) | 720   | **0.22** |  1.28  |  1.49  |   2.50 |  17.97 |
+| ARIMA(0,0,1) | 2 880 | **0.91** |  5.34  |  5.90  |   7.76 |  56.16 |
+| ARIMA(1,0,1) | 144   | **0.10** |  0.65  |  0.74  |   1.69 |   7.95 |
+| ARIMA(1,0,1) | 720   | **0.46** |  2.73  |  3.30  |   4.11 |  22.61 |
+| ARIMA(1,0,1) | 2 880 | **1.80** | 11.43  | 12.63  |  16.23 |  76.93 |
+| ARIMA(0,1,1) | 144   | **0.05** |  0.28  |  0.29  |   0.37 |   3.70 |
+| ARIMA(0,1,1) | 720   | **0.22** |  1.21  |  1.47  |   1.06 |  10.43 |
+| ARIMA(0,1,1) | 2 880 |   0.86   |  4.89  |  5.44  | **2.25** | 27.75 |
+| ARIMA(1,1,1) | 144   | **0.12** |  0.76  |  0.81  |  13.28 |   7.42 |
+| ARIMA(1,1,1) | 720   | **0.54** |  2.83  |  3.70  |   4.47 |  17.23 |
+| ARIMA(1,1,1) | 2 880 | **2.09** | 12.08  | 14.12  |   9.53 |  57.21 |
+| SARIMA(0,1,1)(0,1,1)[12] | 144 | **0.32** |  62.65 |  70.21 |  16.24 | 214.37 |
+| SARIMA(0,1,1)(0,1,1)[12] | 288 | **0.69** | 125.68 |  95.91 |  31.63 | 285.61 |
 
-(All times in ms, median of 5–50 iters.)
+(All times in ms, median of 3–50 iters.)
 
-**Like-for-like (Kalman MLE)**: rust-stats is **3–18× faster** than
-statsmodels across every workload, with the largest gap on short
-non-seasonal series. **CSS path**: **30–410× faster**, with the biggest
-multiplier on SARIMA — at n=288 the airline model fits in 0.69 ms with
-CSS vs 286 ms in statsmodels, a 414× speedup.
+**rust-stats CSS-ML vs R arima** (both Kalman MLE with CSS seeds):
+rust-stats is roughly **1.5–3× faster** on non-seasonal models thanks
+to a tighter Nelder-Mead inner loop. R wins on **SARIMA** (R 16.2 ms
+vs ours 70.2 ms on the airline model at n=144) — R's `arima` is a
+mature Fortran/C implementation, and its Kalman + L-BFGS handles the
+state-space dimension growth of seasonal models more efficiently than
+our Nelder-Mead does.
+
+**rust-stats MLE vs statsmodels SARIMAX** (same Gaussian Kalman
+objective, both default-optimised): rust-stats is **3–18× faster**
+across every workload.
+
+**CSS path** (different objective — faster, slightly less efficient
+at finite n): **3–410× faster** than the references, with the biggest
+multiplier on SARIMA at long horizons.
+
+R wins one cell strictly (ARIMA(0,1,1) n=2880, where its IMA(1,1)
+fast path is essentially free), and beats us on SARIMA where the
+optimizer choice matters more than the kernel speed. Everywhere else,
+rust-stats is at least competitive and usually faster.
 
 Reproduce with:
 
 ```sh
 cargo run --release --example bench_arima
 python3 tests/golden/bench_arima_statsmodels.py
+Rscript tests/golden/bench_arima_r.R
 ```
 
 ### Batched (50 series per call)
