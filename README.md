@@ -402,8 +402,8 @@ space.)
   ~1 s).
 - **rust-stats MLE vs pmdarima** (same Gaussian Kalman objective):
   pmdarima wins. Our Nelder-Mead optimiser is slower than scipy's
-  L-BFGS-B once the parameter space gets non-trivial. An L-BFGS port
-  is the natural fix and lives on the roadmap.
+  L-BFGS-B once the parameter space gets non-trivial. A
+  strong-Wolfe-L-BFGS port is the natural fix; see Roadmap.
 
 Reproduce with:
 
@@ -451,9 +451,10 @@ constant:
   not interesting numbers — the time is dominated by Nelder-Mead
   iterations, not by the per-point cost.
 
-The L-BFGS port on the roadmap is squarely aimed at the CSS-ML / MLE
-column — if we matched R's per-fit constant, we'd be the throughput
-winner across all five columns simultaneously.
+Closing the CSS-ML / MLE column to match R's per-fit constant needs
+a strong-Wolfe L-BFGS — see the Roadmap section below for why
+backtracking-Armijo L-BFGS isn't enough on the Kalman likelihood
+surface.
 
 Reproduce with:
 
@@ -513,12 +514,16 @@ code, roughly ordered by user-visible impact:
 
 ### ARIMA / SARIMA
 
-- **L-BFGS optimiser for the MLE path.** Today the CSS-ML / MLE
-  fitters run Nelder-Mead on the PACF-reparameterised parameter
+- **L-BFGS-with-strong-Wolfe for the MLE path.** Today the CSS-ML /
+  MLE fitters run Nelder-Mead on the PACF-reparameterised parameter
   space. It's robust but slow on >5-dimensional problems — most
   visibly on SARIMA airline-style models, where the benchmarks above
   show rust-stats' MLE losing to both R's `arima` and pmdarima.
-  Porting to L-BFGS-B with numerical gradients should close that gap.
+  L-BFGS with backtracking-Armijo line search was tried and found
+  insufficient: 2–7× faster on CSS, 100× slower on SARIMA MLE
+  depending on local curvature. A proper L-BFGS port needs a
+  strong-Wolfe line search (More-Thuente or bisection) — that's the
+  separate project that would close the gap.
 - **Joint ARIMAX MLE.** `arima_with_exog` currently does the simple
   two-stage thing: OLS for β, then ARMA on the residuals. The
   efficient version fits (β, φ, θ) jointly inside one likelihood

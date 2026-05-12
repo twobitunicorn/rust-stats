@@ -361,12 +361,19 @@ fn arima_no_exog(y: &[f64], opts: ArimaOpts) -> Result<ArimaFit, ArimaError> {
         let total_ma = convolve_ma(&theta, &theta_s, mm);
         kalman::concentrated_neg_loglik(&w_centered, &total_ar, &total_ma)
     };
+    // Optimisation via Nelder-Mead. L-BFGS was tried as a faster
+    // alternative (the `lbfgs` submodule still ships with the crate)
+    // but its backtracking-Armijo line search is too fragile on the
+    // Kalman likelihood surface — some cells converged 2-7× faster,
+    // others 100× slower depending on local curvature. Closing that
+    // gap properly needs a strong-Wolfe line search (More-Thuente or
+    // bisection), which is a separate project. For now NM is the
+    // robust default; see the Roadmap section in the README.
     let max_iter = 2_000 + 200 * pn;
     let (x_star, _f_star, converged) = match opts.method {
         ArimaMethod::Css => nelder_mead::minimize(&x0, &css_obj, max_iter, 1e-8),
         ArimaMethod::Mle => nelder_mead::minimize(&x0, &mle_obj, max_iter, 1e-8),
         ArimaMethod::CssMle => {
-            // CSS first, then MLE refinement from CSS solution.
             let (x_css, _, css_ok) =
                 nelder_mead::minimize(&x0, &css_obj, max_iter, 1e-8);
             if !css_ok {
