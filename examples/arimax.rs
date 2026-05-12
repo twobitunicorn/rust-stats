@@ -17,6 +17,9 @@
 //!      doesn't know about the holiday/promotion bumps, so its
 //!      forecast intervals must be wider.
 //!
+//! Estimation: joint MLE over (β₀, β, φ, θ) — the same approach R's
+//! `arima(xreg=)` and statsmodels' SARIMAX take.
+//!
 //! Run with:
 //!
 //!   cargo run --release --example arimax

@@ -524,10 +524,14 @@ code, roughly ordered by user-visible impact:
   enhancement to the line search (More-Thuente proper, not just
   bisection-zoom), or analytic gradients to skip the `2n+1`-feval
   finite-difference pass per L-BFGS iteration.
-- **Joint ARIMAX MLE.** `arima_with_exog` currently does the simple
-  two-stage thing: OLS for β, then ARMA on the residuals. The
-  efficient version fits (β, φ, θ) jointly inside one likelihood
-  optimisation — what R's `arima(xreg=)` and statsmodels' SARIMAX do.
+- ~~**Joint ARIMAX MLE.**~~ Done. `arima_with_exog` now fits
+  `(β₀, β, φ, Φ, θ, Θ)` jointly against one likelihood, same approach
+  R's `arima(xreg=)` and statsmodels' SARIMAX take. Two-stage seed
+  (OLS for β, HR for φ/θ) still feeds the optimiser. Cost: ~2× slower
+  per fit on non-seasonal, ~3-7× slower on SARIMAX (the optimiser
+  now searches over a larger parameter vector). Benefit: tighter σ̂²
+  and slightly more accurate β when residual ARMA is strong, matching
+  the standard reference implementations.
 - **Kalman smoother for in-sample fitted values.** The `fitted`
   vector currently comes from the CSS recursion; a backward pass
   would tighten it at the start of the series.

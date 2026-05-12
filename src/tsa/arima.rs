@@ -203,7 +203,6 @@ pub fn arima_with_exog(
         });
     }
     let n = y.len();
-    // Validate exog shape.
     for col in exog {
         if col.len() != n {
             return Err(ArimaError::SeriesTooShort {
@@ -215,64 +214,295 @@ pub fn arima_with_exog(
             });
         }
     }
-    // Stage 1: OLS on [1, exog] if any regressors. Compute residuals.
+    if exog.is_empty() {
+        return arima_no_exog(y, opts);
+    }
+    arima_joint_exog(y, exog, opts)
+}
+
+/// Joint MLE for the ARIMAX model: `(β₀, β, φ, Φ, θ, Θ)` are fitted
+/// simultaneously against the same likelihood, instead of the older
+/// two-stage "OLS for β, ARMA on residuals" approach. Joint estimation
+/// is more efficient when residual ARMA is strongly autocorrelated —
+/// matches what R's `arima(xreg=)` and statsmodels' SARIMAX do.
+///
+/// Seed values come from the two-stage approach (OLS on `[1, exog]` for
+/// `(β₀, β)`; Hannan-Rissanen on the OLS residuals for `(φ, θ)`).
+/// That keeps the optimiser starting from a sensible region without
+/// any added machinery.
+fn arima_joint_exog(
+    y: &[f64],
+    exog: &[&[f64]],
+    opts: ArimaOpts,
+) -> Result<ArimaFit, ArimaError> {
+    let p = opts.p as usize;
+    let q = opts.q as usize;
+    let d = opts.d as usize;
+    let mm = opts.seasonal_period as usize;
+    let has_seasonal = mm > 0;
+    let big_p = if has_seasonal { opts.seasonal_p as usize } else { 0 };
+    let big_d = if has_seasonal { opts.seasonal_d as usize } else { 0 };
+    let big_q = if has_seasonal { opts.seasonal_q as usize } else { 0 };
+
+    let n = y.len();
     let k = exog.len();
-    let (beta0, beta, residuals) = if k == 0 {
-        (0.0, Vec::new(), y.to_vec())
-    } else {
-        let cols = 1 + k;
-        let mut design = vec![0.0f64; n * cols];
-        for i in 0..n {
-            design[i * cols] = 1.0;
-            for j in 0..k {
-                design[i * cols + 1 + j] = exog[j][i];
-            }
-        }
-        let coefs = ols::solve(&design, y, n, cols).ok_or(ArimaError::Singular)?;
-        let b0 = coefs[0];
-        let b: Vec<f64> = coefs[1..].to_vec();
-        let mut r = y.to_vec();
-        for i in 0..n {
-            r[i] -= b0;
-            for j in 0..k {
-                r[i] -= b[j] * exog[j][i];
-            }
-        }
-        (b0, b, r)
-    };
+    let ar_order = p + big_p * mm;
+    let ma_order = q + big_q * mm;
+    let recursion_order = ar_order.max(ma_order);
+    let total_diff = d + big_d * mm;
+    let min_n = total_diff + recursion_order + 2;
+    if n < min_n {
+        return Err(ArimaError::SeriesTooShort {
+            n,
+            min: min_n,
+            p: opts.p,
+            d: opts.d,
+            q: opts.q,
+        });
+    }
+    if y.iter().any(|v| !v.is_finite())
+        || exog.iter().any(|c| c.iter().any(|v| !v.is_finite()))
+    {
+        return Err(ArimaError::NonFinite);
+    }
 
-    // Stage 2: ARIMA on residuals. When exog is present we suppress the
-    // inner intercept (the level constant was absorbed by `beta0`).
-    let inner_opts = ArimaOpts {
-        include_constant: if k == 0 { opts.include_constant } else { false },
-        ..opts
-    };
-    let mut fit = arima_no_exog(&residuals, inner_opts)?;
-
-    // Patch with stage-1 outputs: intercept is β₀; β contains the exog
-    // slopes; fitted values get the stage-1 part added back.
-    //
-    // We deliberately keep `fit.last_obs` pointing at the residual's
-    // tail — forecasting integrates the inner ARIMA on the *residual*
-    // scale, then adds back (β₀ + β·x_future) to get the y-scale
-    // forecasts.
-    if k > 0 {
-        fit.intercept = beta0;
-        fit.beta = beta;
-        for i in 0..n {
-            let mut adj = beta0;
-            for j in 0..k {
-                adj += fit.beta[j] * exog[j][i];
-            }
-            // residual_t = y_t - (β₀ + β·x_t). Inner-ARIMA fitted_t is on
-            // the residual scale; original-scale fitted_t = β₀ + β·x_t +
-            // inner_fitted_t. Skip the warm-up rows the inner zeroed.
-            if fit.fitted[i] != 0.0 || fit.residuals[i] != 0.0 {
-                fit.fitted[i] += adj;
-            }
+    // ── 1. Two-stage seed for the joint optimiser. ─────────────────
+    let cols = 1 + k;
+    let mut design = vec![0.0f64; n * cols];
+    for i in 0..n {
+        design[i * cols] = 1.0;
+        for j in 0..k {
+            design[i * cols + 1 + j] = exog[j][i];
         }
     }
-    Ok(fit)
+    let coefs = ols::solve(&design, y, n, cols).ok_or(ArimaError::Singular)?;
+    let beta0_seed = coefs[0];
+    let beta_seed: Vec<f64> = coefs[1..].to_vec();
+
+    // Residuals from the OLS step, then their differencing → HR seed.
+    let mut r = y.to_vec();
+    for i in 0..n {
+        r[i] -= beta0_seed;
+        for j in 0..k {
+            r[i] -= beta_seed[j] * exog[j][i];
+        }
+    }
+    let w_r = full_difference(&r, d, big_d, mm);
+    let (phi_seed, theta_seed) = hannan_rissanen_seed(&w_r, p, q)?;
+
+    // ── 2. Pack initial parameter vector. ──────────────────────────
+    //   layout: [β₀, β_1, …, β_k, real_φ…, real_Φ…, real_θ…, real_Θ…]
+    let pn = p + big_p + q + big_q;
+    let total_params = 1 + k + pn;
+    let mut x0 = vec![0.0f64; total_params];
+    x0[0] = beta0_seed;
+    for j in 0..k {
+        x0[1 + j] = beta_seed[j];
+    }
+    let mut idx = 1 + k;
+    let phi_pacf = transform::ar_poly_to_pacf(&phi_seed);
+    for v in &phi_pacf {
+        x0[idx] = transform::pacf_to_real(*v);
+        idx += 1;
+    }
+    for _ in 0..big_p {
+        x0[idx] = 0.0;
+        idx += 1;
+    }
+    let theta_pacf = transform::ma_poly_to_pacf(&theta_seed);
+    for v in &theta_pacf {
+        x0[idx] = transform::pacf_to_real(*v);
+        idx += 1;
+    }
+    for _ in 0..big_q {
+        x0[idx] = 0.0;
+        idx += 1;
+    }
+
+    // ── 3. Joint objectives. ───────────────────────────────────────
+    //   `purge` rebuilds e_t = y_t − β₀ − β·x_t into a scratch buffer
+    //   each call. We allocate one Vec inside the closure to keep the
+    //   borrow checker happy; cost is small relative to the Kalman /
+    //   CSS pass that follows.
+    let css_obj = |x: &[f64]| -> f64 {
+        let beta0 = x[0];
+        let beta = &x[1..1 + k];
+        let params = &x[1 + k..];
+        let (phi, phi_s, theta, theta_s) = unpack_full(params, p, big_p, q, big_q);
+        let total_ar = convolve_ar(&phi, &phi_s, mm);
+        let total_ma = convolve_ma(&theta, &theta_s, mm);
+        let mut e = vec![0.0f64; n];
+        for i in 0..n {
+            e[i] = y[i] - beta0;
+            for j in 0..k {
+                e[i] -= beta[j] * exog[j][i];
+            }
+        }
+        let w_e = full_difference(&e, d, big_d, mm);
+        css_sse(&w_e, &total_ar, &total_ma)
+    };
+    let mle_obj = |x: &[f64]| -> f64 {
+        let beta0 = x[0];
+        let beta = &x[1..1 + k];
+        let params = &x[1 + k..];
+        let (phi, phi_s, theta, theta_s) = unpack_full(params, p, big_p, q, big_q);
+        let total_ar = convolve_ar(&phi, &phi_s, mm);
+        let total_ma = convolve_ma(&theta, &theta_s, mm);
+        let mut e = vec![0.0f64; n];
+        for i in 0..n {
+            e[i] = y[i] - beta0;
+            for j in 0..k {
+                e[i] -= beta[j] * exog[j][i];
+            }
+        }
+        let w_e = full_difference(&e, d, big_d, mm);
+        kalman::concentrated_neg_loglik(&w_e, &total_ar, &total_ma)
+    };
+
+    // ── 4. Dispatch identical to arima_no_exog. ────────────────────
+    let max_iter = 2_000 + 200 * total_params;
+    let use_lbfgs = has_seasonal;
+    let x_star = match opts.method {
+        ArimaMethod::Css => {
+            let (x, _, ok) = nelder_mead::minimize(&x0, &css_obj, max_iter, 1e-8);
+            if !ok {
+                return Err(ArimaError::OptimizationFailed { iters: max_iter });
+            }
+            x
+        }
+        ArimaMethod::Mle => {
+            if use_lbfgs {
+                optimize_arima_mle(&x0, &mle_obj, total_params)?
+            } else {
+                let (x, _, ok) = nelder_mead::minimize(&x0, &mle_obj, max_iter, 1e-8);
+                if !ok {
+                    return Err(ArimaError::OptimizationFailed { iters: max_iter });
+                }
+                x
+            }
+        }
+        ArimaMethod::CssMle => {
+            let (x_css, _, css_ok) =
+                nelder_mead::minimize(&x0, &css_obj, max_iter, 1e-8);
+            if !css_ok {
+                return Err(ArimaError::OptimizationFailed { iters: max_iter });
+            }
+            if use_lbfgs {
+                optimize_arima_mle(&x_css, &mle_obj, total_params)?
+            } else {
+                let (x, _, ok) =
+                    nelder_mead::minimize(&x_css, &mle_obj, max_iter, 1e-8);
+                if !ok {
+                    return Err(ArimaError::OptimizationFailed { iters: max_iter });
+                }
+                x
+            }
+        }
+    };
+
+    // ── 5. Extract final parameters. ───────────────────────────────
+    let beta0_final = x_star[0];
+    let beta_final: Vec<f64> = x_star[1..1 + k].to_vec();
+    let params = &x_star[1 + k..];
+    let (phi, phi_s, theta, theta_s) = unpack_full(params, p, big_p, q, big_q);
+    let total_ar = convolve_ar(&phi, &phi_s, mm);
+    let total_ma = convolve_ma(&theta, &theta_s, mm);
+
+    // ── 6. Residuals / fitted on the original scale. ───────────────
+    let mut e = vec![0.0f64; n];
+    for i in 0..n {
+        e[i] = y[i] - beta0_final;
+        for j in 0..k {
+            e[i] -= beta_final[j] * exog[j][i];
+        }
+    }
+    let w_e = full_difference(&e, d, big_d, mm);
+    let n_w = w_e.len();
+    let eps = compute_eps(&w_e, &total_ar, &total_ma);
+    let m_eff = n_w.saturating_sub(recursion_order);
+    let sigma2 = match opts.method {
+        ArimaMethod::Css => {
+            let sse: f64 = eps.iter().skip(recursion_order).map(|e| e * e).sum();
+            if m_eff > 0 { sse / m_eff as f64 } else { f64::NAN }
+        }
+        ArimaMethod::Mle | ArimaMethod::CssMle => {
+            kalman::concentrated_sigma2(&w_e, &total_ar, &total_ma)
+        }
+    };
+    let fitted_w_e: Vec<f64> = (0..n_w).map(|t| w_e[t] - eps[t]).collect();
+    let fitted_e = full_integrate_in_sample(&e, &fitted_w_e, d, big_d, mm);
+    let mut fitted = vec![0.0f64; n];
+    let mut residuals = vec![0.0f64; n];
+    for i in 0..n {
+        let mut adj = beta0_final;
+        for j in 0..k {
+            adj += beta_final[j] * exog[j][i];
+        }
+        fitted[i] = fitted_e[i] + adj;
+        residuals[i] = y[i] - fitted[i];
+    }
+    let warmup = total_diff + recursion_order;
+    for i in 0..warmup.min(n) {
+        fitted[i] = 0.0;
+        residuals[i] = 0.0;
+    }
+
+    // ── 7. Information criteria. ───────────────────────────────────
+    let k_ic = total_params as f64 + 1.0; // params + sigma2
+    let log_lik =
+        -0.5 * (m_eff as f64) * ((2.0 * std::f64::consts::PI * sigma2).ln() + 1.0);
+    let aic = 2.0 * k_ic - 2.0 * log_lik;
+    let n_eff = m_eff as f64;
+    let aicc = if n_eff - k_ic - 1.0 > 0.0 {
+        aic + 2.0 * k_ic * (k_ic + 1.0) / (n_eff - k_ic - 1.0)
+    } else {
+        f64::INFINITY
+    };
+    let bic = n_eff.ln() * k_ic - 2.0 * log_lik;
+
+    // ── 8. Tail state — forecasts integrate on the residual (e) scale
+    //   and then add β₀ + β·x_future, so save e's tail not y's.
+    let take_n = recursion_order.max(1);
+    let w_tail: Vec<f64> = w_e
+        .iter()
+        .rev()
+        .take(take_n)
+        .copied()
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    let eps_tail: Vec<f64> = eps
+        .iter()
+        .rev()
+        .take(take_n)
+        .copied()
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    let last_obs: Vec<f64> = e[n.saturating_sub(total_diff)..].to_vec();
+
+    Ok(ArimaFit {
+        phi,
+        theta,
+        seasonal_phi: phi_s,
+        seasonal_theta: theta_s,
+        beta: beta_final,
+        intercept: beta0_final,
+        sigma2,
+        log_likelihood: log_lik,
+        aic,
+        aicc,
+        bic,
+        fitted,
+        residuals,
+        n_obs: m_eff,
+        opts,
+        last_obs,
+        w_tail,
+        eps_tail,
+    })
 }
 
 /// Internal: ARIMA fit with no exog. Pulled out so `arima_with_exog`
