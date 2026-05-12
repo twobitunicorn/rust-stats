@@ -341,18 +341,18 @@ different (faster, slightly less efficient at finite n) estimator.
 | ARIMA(1,1,1) | 144   | **0.12** |  0.76  |  0.81  |  13.28 |   7.42 |
 | ARIMA(1,1,1) | 720   | **0.54** |  2.83  |  3.70  |   4.47 |  17.23 |
 | ARIMA(1,1,1) | 2 880 | **2.09** | 12.08  | 14.12  |   9.53 |  57.21 |
-| SARIMA(0,1,1)(0,1,1)[12] | 144 | **0.32** |  62.65 |  70.21 |  16.24 | 214.37 |
-| SARIMA(0,1,1)(0,1,1)[12] | 288 | **0.69** | 125.68 |  95.91 |  31.63 | 285.61 |
+| SARIMA(0,1,1)(0,1,1)[12] | 144 | **0.34** |  49.77 |  42.13 |  16.24 | 214.37 |
+| SARIMA(0,1,1)(0,1,1)[12] | 288 | **0.72** |  48.74 |  33.47 |  31.63 | 285.61 |
 
 (All times in ms, median of 3–50 iters.)
 
 **rust-stats CSS-ML vs R arima** (both Kalman MLE with CSS seeds):
-rust-stats is roughly **1.5–3× faster** on non-seasonal models thanks
-to a tighter Nelder-Mead inner loop. R wins on **SARIMA** (R 16.2 ms
-vs ours 70.2 ms on the airline model at n=144) — R's `arima` is a
-mature Fortran/C implementation, and its Kalman + L-BFGS handles the
-state-space dimension growth of seasonal models more efficiently than
-our Nelder-Mead does.
+rust-stats is roughly **1.5–3× faster** on non-seasonal models. R
+still wins on **SARIMA** (R 16.2 ms vs ours 42.1 ms on the airline
+model at n=144) — R's `arima` is a mature Fortran/C implementation —
+but the strong-Wolfe L-BFGS gate we added for seasonal MLE / CSS-ML
+cut our SARIMA times by ~2× from the original Nelder-Mead-only
+numbers (95.9 → 33.5 ms at n=288).
 
 **rust-stats MLE vs statsmodels SARIMAX** (same Gaussian Kalman
 objective, both default-optimised): rust-stats is **3–18× faster**
@@ -514,16 +514,16 @@ code, roughly ordered by user-visible impact:
 
 ### ARIMA / SARIMA
 
-- **L-BFGS-with-strong-Wolfe for the MLE path.** Today the CSS-ML /
-  MLE fitters run Nelder-Mead on the PACF-reparameterised parameter
-  space. It's robust but slow on >5-dimensional problems — most
-  visibly on SARIMA airline-style models, where the benchmarks above
-  show rust-stats' MLE losing to both R's `arima` and pmdarima.
-  L-BFGS with backtracking-Armijo line search was tried and found
-  insufficient: 2–7× faster on CSS, 100× slower on SARIMA MLE
-  depending on local curvature. A proper L-BFGS port needs a
-  strong-Wolfe line search (More-Thuente or bisection) — that's the
-  separate project that would close the gap.
+- **Optimiser tuning for the MLE path.** Done in two stages so far:
+  Nelder-Mead is the universal default; for seasonal models the
+  L-BFGS-with-strong-Wolfe path (`src/tsa/arima/lbfgs.rs`) kicks in
+  and cuts SARIMA airline fits roughly in half. Remaining work:
+  closing the remaining ~2× SARIMA gap to R's `arima` (mature
+  Fortran), and improving the non-seasonal CSS-ML throughput where R
+  is also faster at large n. Likely paths: cubic-interpolation
+  enhancement to the line search (More-Thuente proper, not just
+  bisection-zoom), or analytic gradients to skip the `2n+1`-feval
+  finite-difference pass per L-BFGS iteration.
 - **Joint ARIMAX MLE.** `arima_with_exog` currently does the simple
   two-stage thing: OLS for β, then ARMA on the residuals. The
   efficient version fits (β, φ, θ) jointly inside one likelihood
