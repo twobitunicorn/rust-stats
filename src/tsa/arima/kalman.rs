@@ -73,8 +73,9 @@ impl ArmaSs {
             .collect();
         let mut p = rrt.clone();
         let mut work_b = vec![0.0f64; r * r];
+        let mut scratch = vec![0.0f64; r];
         for _ in 0..500 {
-            t_x_tt(&t_col0, &p, &mut work_b, r);
+            t_x_tt(&t_col0, &p, &mut work_b, &mut scratch, r);
             let mut max_diff = 0.0f64;
             for k in 0..r * r {
                 let new_v = work_b[k] + rrt[k];
@@ -150,6 +151,7 @@ impl ArmaSs {
         let mut p_upd = vec![0.0f64; r * r];
 
         let mut work_b = vec![0.0f64; r * r];
+        let mut scratch_v = vec![0.0f64; r];
 
         let mut dk = vec![0.0f64; r];
         let mut da_upd = vec![0.0f64; r];
@@ -237,7 +239,7 @@ impl ArmaSs {
                 //          + ∂T · P_upd · Tᵀ            (rank-1: dt_col0 ⊗ p_upd_row0_t)
                 //          + T · P_upd · ∂Tᵀ            (rank-1: t_p_upd_col0 ⊗ dt_col0)
                 //          + ∂R · Rᵀ + R · ∂Rᵀ          (rank-1 outer)
-                t_x_tt(&t_col0, &dp_upd, &mut work_b, r);
+                t_x_tt(&t_col0, &dp_upd, &mut work_b, &mut scratch_v, r);
                 for i in 0..r {
                     let dt_i = dt_col0[i];
                     let t_p_col0_i = t_p_upd_col0[i];
@@ -255,7 +257,7 @@ impl ArmaSs {
 
             // Predict next: a ← T · a_upd; P ← T · P_upd · Tᵀ + R Rᵀ.
             t_vec(&t_col0, &a_upd, &mut a, r);
-            t_x_tt(&t_col0, &p_upd, &mut work_b, r);
+            t_x_tt(&t_col0, &p_upd, &mut work_b, &mut scratch_v, r);
             for k in 0..r * r {
                 p_mat[k] = work_b[k] + rrt[k];
             }
@@ -323,8 +325,9 @@ impl ArmaSs {
             // `t_x_tt` since T has the same companion structure here.
             let t_col0: Vec<f64> = (0..r).map(|i| self.t_matrix[i * r]).collect();
             let mut dp = g.clone();
+            let mut scratch_v = vec![0.0f64; r];
             for _ in 0..500 {
-                t_x_tt(&t_col0, &dp, &mut work_b, r);
+                t_x_tt(&t_col0, &dp, &mut work_b, &mut scratch_v, r);
                 let mut max_diff = 0.0f64;
                 for k in 0..r * r {
                     let new_v = work_b[k] + g[k];
@@ -366,6 +369,7 @@ impl ArmaSs {
         let mut a_upd = vec![0.0f64; r];
         let mut p_upd = vec![0.0f64; r * r];
         let mut work_b = vec![0.0f64; r * r];
+        let mut scratch_v = vec![0.0f64; r];
 
         let mut predicted = if COLLECT { Vec::with_capacity(y.len()) } else { Vec::new() };
         let mut innovations = if COLLECT { Vec::with_capacity(y.len()) } else { Vec::new() };
@@ -406,7 +410,7 @@ impl ArmaSs {
             }
             // Predict next: a ← T · a_upd; P ← T · P_upd · Tᵀ + R Rᵀ.
             t_vec(&t_col0, &a_upd, &mut a, r);
-            t_x_tt(&t_col0, &p_upd, &mut work_b, r);
+            t_x_tt(&t_col0, &p_upd, &mut work_b, &mut scratch_v, r);
             for k in 0..r * r {
                 p_mat[k] = work_b[k] + rrt[k];
             }
@@ -532,33 +536,11 @@ pub(super) fn concentrated_nll_and_grad(
 }
 
 // ----------------------------------------------------------------------
-// Tiny row-major linear algebra primitives.
+// ARMA companion-form linear algebra primitives. The generic `mat_mul`
+// helpers are gone — every appearance of `T · X · Tᵀ`, `T · X`, and
+// `T · v` in the Kalman filter is now routed through the structure-
+// aware kernels below (O(r²) / O(r) instead of O(r³) / O(r²)).
 // ----------------------------------------------------------------------
-
-fn mat_mul(a: &[f64], b: &[f64], out: &mut [f64], m: usize, k: usize, n: usize) {
-    for i in 0..m {
-        for j in 0..n {
-            let mut s = 0.0;
-            for l in 0..k {
-                s += a[i * k + l] * b[l * n + j];
-            }
-            out[i * n + j] = s;
-        }
-    }
-}
-
-/// `out (m×n) = a (m×k) * bᵀ` where `b` is stored as `(n×k)` row-major.
-fn mat_mul_b_transpose(a: &[f64], b: &[f64], out: &mut [f64], m: usize, k: usize, n: usize) {
-    for i in 0..m {
-        for j in 0..n {
-            let mut s = 0.0;
-            for l in 0..k {
-                s += a[i * k + l] * b[j * k + l];
-            }
-            out[i * n + j] = s;
-        }
-    }
-}
 
 /// Companion-form `T · X · Tᵀ` in O(r²). Exploits `T = phi·e_0ᵀ + S`
 /// (where `phi = t_col0` and `S` is the super-diagonal shift):
@@ -571,55 +553,36 @@ fn mat_mul_b_transpose(a: &[f64], b: &[f64], out: &mut [f64], m: usize, k: usize
 ///                     placed at (0,0) and zero-padded)
 /// ```
 ///
-/// Saves the two dense `O(r³)` mat-muls that a generic
-/// `mat_mul(T, X)` then `mat_mul_b_transpose(·, T)` pair costs.
-fn t_x_tt(t_col0: &[f64], x: &[f64], out: &mut [f64], r: usize) {
+/// Inner loops are branch-free over `j ∈ 0..r` — `scratch` is a
+/// caller-supplied length-r work buffer (avoids the per-call Vec
+/// allocation that would otherwise dominate at small `r`).
+fn t_x_tt(t_col0: &[f64], x: &[f64], out: &mut [f64], scratch: &mut [f64], r: usize) {
     let x00 = x[0];
-    // S·X·Sᵀ — shift up-and-left, zero last row & column.
-    for i in 0..r {
-        if i + 1 < r {
-            for j in 0..r {
-                if j + 1 < r {
-                    out[i * r + j] = x[(i + 1) * r + (j + 1)];
-                } else {
-                    out[i * r + j] = 0.0;
-                }
-            }
-        } else {
-            for j in 0..r {
-                out[i * r + j] = 0.0;
-            }
-        }
-    }
-    // Rank-1 contributions.
-    for i in 0..r {
-        let phi_i = t_col0[i];
-        let col0_shifted_i = if i + 1 < r { x[(i + 1) * r] } else { 0.0 };
-        for j in 0..r {
-            let phi_j = t_col0[j];
-            let row0_shifted_j = if j + 1 < r { x[j + 1] } else { 0.0 };
-            out[i * r + j] += x00 * phi_i * phi_j
-                + phi_i * row0_shifted_j
-                + col0_shifted_i * phi_j;
-        }
-    }
-}
+    // row0_shift[j] = X[0, j+1] for j<r-1, else 0.
+    scratch[..r - 1].copy_from_slice(&x[1..r]);
+    scratch[r - 1] = 0.0;
 
-/// Companion-form `T · X` in O(r²). `(T·X)[i, j] = phi[i]·X[0, j] +
-/// X[i+1, j]` (with the second term zero when `i+1 ≥ r`).
-fn t_x(t_col0: &[f64], x: &[f64], out: &mut [f64], r: usize) {
-    for i in 0..r {
+    for i in 0..r - 1 {
         let phi_i = t_col0[i];
-        let shifted_base = if i + 1 < r { (i + 1) * r } else { usize::MAX };
-        for j in 0..r {
-            let shifted = if shifted_base == usize::MAX {
-                0.0
-            } else {
-                x[shifted_base + j]
-            };
-            out[i * r + j] = phi_i * x[j] + shifted;
+        let col0_shift_i = x[(i + 1) * r];
+        let alpha_phi = phi_i;
+        let beta_phi = col0_shift_i + x00 * phi_i;
+        let src_row = &x[(i + 1) * r + 1..(i + 1) * r + r];
+        let dst_row = &mut out[i * r..i * r + r];
+        for j in 0..r - 1 {
+            dst_row[j] = src_row[j]
+                + alpha_phi * scratch[j]
+                + beta_phi * t_col0[j];
         }
+        dst_row[r - 1] = beta_phi * t_col0[r - 1];
     }
+    let phi_last = t_col0[r - 1];
+    let beta_last = x00 * phi_last;
+    let dst_last = &mut out[(r - 1) * r..(r - 1) * r + r];
+    for j in 0..r - 1 {
+        dst_last[j] = phi_last * scratch[j] + beta_last * t_col0[j];
+    }
+    dst_last[r - 1] = beta_last * t_col0[r - 1];
 }
 
 /// Companion-form `T · v` in O(r). `(T·v)[i] = phi[i]·v[0] +
@@ -636,28 +599,6 @@ fn t_vec_add(t_col0: &[f64], v: &[f64], out: &mut [f64], r: usize) {
     for i in 0..r {
         let shifted = if i + 1 < r { v[i + 1] } else { 0.0 };
         out[i] += t_col0[i] * v[0] + shifted;
-    }
-}
-
-fn mat_vec(a: &[f64], x: &[f64], out: &mut [f64], m: usize, n: usize) {
-    for i in 0..m {
-        let mut s = 0.0;
-        for j in 0..n {
-            s += a[i * n + j] * x[j];
-        }
-        out[i] = s;
-    }
-}
-
-/// `out += a · x`, sized `m × n` · `n × 1` → `m`. Used to add a
-/// second contribution into the same accumulator.
-fn mat_vec_add(a: &[f64], x: &[f64], out: &mut [f64], m: usize, n: usize) {
-    for i in 0..m {
-        let mut s = 0.0;
-        for j in 0..n {
-            s += a[i * n + j] * x[j];
-        }
-        out[i] += s;
     }
 }
 

@@ -332,17 +332,17 @@ different (faster, slightly less efficient at finite n) estimator.
 | ARIMA(0,0,1) | 144   | **0.09** |  0.26  |  0.28  |   1.11 |   5.45 |
 | ARIMA(0,0,1) | 720   | **0.41** |  1.13  |  1.31  |   2.50 |  17.97 |
 | ARIMA(0,0,1) | 2 880 | **1.68** |  4.50  |  5.19  |   7.76 |  56.16 |
-| ARIMA(1,0,1) | 144   | **0.19** |  0.55  |  0.64  |   1.69 |   7.95 |
-| ARIMA(1,0,1) | 720   | **0.84** |  2.34  |  2.89  |   4.11 |  22.61 |
-| ARIMA(1,0,1) | 2 880 | **3.24** |  9.64  | 11.08  |  16.23 |  76.93 |
+| ARIMA(1,0,1) | 144   | **0.19** |  0.54  |  0.64  |   1.69 |   7.95 |
+| ARIMA(1,0,1) | 720   | **0.82** |  2.23  |  2.79  |   4.11 |  22.61 |
+| ARIMA(1,0,1) | 2 880 | **3.26** |  9.19  | 10.68  |  16.23 |  76.93 |
 | ARIMA(0,1,1) | 144   | **0.09** |  0.24  |  0.27  |   0.37 |   3.70 |
 | ARIMA(0,1,1) | 720   | **0.40** |  1.07  |  1.29  |   1.06 |  10.43 |
 | ARIMA(0,1,1) | 2 880 | **1.65** |  4.31  |  4.98  |   2.25 |  27.75 |
-| ARIMA(1,1,1) | 144   | **0.21** |  0.66  |  0.70  |  13.28 |   7.42 |
-| ARIMA(1,1,1) | 720   | **0.92** |  2.46  |  3.27  |   4.47 |  17.23 |
-| ARIMA(1,1,1) | 2 880 | **3.55** | 10.16  | 12.15  |   9.53 |  57.21 |
-| SARIMA(0,1,1)(0,1,1)[12] | 144 | **1.81** | **11.25** | **10.35** |  16.24 | 214.37 |
-| SARIMA(0,1,1)(0,1,1)[12] | 288 | **3.60** | **12.88** |  34.43 |  31.63 | 285.61 |
+| ARIMA(1,1,1) | 144   | **0.21** |  0.61  |  0.68  |  13.28 |   7.42 |
+| ARIMA(1,1,1) | 720   | **0.94** |  2.34  |  3.13  |   4.47 |  17.23 |
+| ARIMA(1,1,1) | 2 880 | **3.60** |  9.74  | 11.82  |   9.53 |  57.21 |
+| SARIMA(0,1,1)(0,1,1)[12] | 144 | **1.20** |  **7.51** |  **6.93** |  16.24 | 214.37 |
+| SARIMA(0,1,1)(0,1,1)[12] | 288 | **2.41** |  **8.37** |  21.11 |  31.63 | 285.61 |
 
 (All times in ms, median of 3–50 iters.) Rust numbers include both
 the per-fit standard-error pass (Hessian + inversion of the natural-
@@ -355,10 +355,11 @@ cut the SARIMA times roughly **5×** and pulled non-seasonal MLE down
 ~30 % as well.
 
 **rust-stats CSS-ML vs R arima** (both Kalman MLE with CSS seeds):
-rust-stats is **1.5–3× faster** on non-seasonal models and now also
-**faster on SARIMA** (10.3 ms vs 16.2 ms on the airline model at
+rust-stats is **1.5–3× faster** on non-seasonal models and **~2.3×
+faster on SARIMA** (6.9 ms vs 16.2 ms on the airline model at
 n=144). The companion-form structure-aware Kalman kernel + analytic
-gradient closed the gap to R's Fortran reference implementation.
+gradient (with branch-free hot loops and no per-step allocation)
+beat R's Fortran reference implementation across the board.
 
 **rust-stats MLE vs statsmodels SARIMAX** (same Gaussian Kalman
 objective, both default-optimised): rust-stats is **3–18× faster**
