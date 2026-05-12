@@ -535,9 +535,14 @@ code, roughly ordered by user-visible impact:
   now searches over a larger parameter vector). Benefit: tighter σ̂²
   and slightly more accurate β when residual ARMA is strong, matching
   the standard reference implementations.
-- **Kalman smoother for in-sample fitted values.** The `fitted`
-  vector currently comes from the CSS recursion; a backward pass
-  would tighten it at the start of the series.
+- ~~**Kalman one-step-ahead predictions for in-sample fitted values.**~~
+  Done. `fit.fitted` and `fit.residuals` are now the Kalman filter's
+  one-step-ahead predictions and innovations on the centered,
+  fully-differenced series (then lifted back to the original scale
+  via integration). The diffuse start handles early observations
+  naturally — no more zero warm-up — matching what R's `fitted(arima)`
+  and statsmodels' `SARIMAX.fittedvalues` return. Applies to all fit
+  methods (CSS, MLE, CSS-ML), same convention R uses.
 - ~~**Coefficient standard errors.**~~ Done. `ArimaFit` exposes
   `phi_se`, `theta_se`, `seasonal_phi_se`, `seasonal_theta_se`,
   `beta_se`, `intercept_se`. SEs are the square roots of the diagonal

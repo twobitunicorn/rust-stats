@@ -445,7 +445,11 @@ fn arima_joint_exog(
             kalman::concentrated_sigma2(&w_e, &total_ar, &total_ma)
         }
     };
-    let fitted_w_e: Vec<f64> = (0..n_w).map(|t| w_e[t] - eps[t]).collect();
+    // Kalman one-step-ahead predictions on the centered, fully-differenced
+    // series — same convention as R's `fitted(arima)`. No zero warm-up:
+    // the filter's diffuse start handles the early observations naturally
+    // (`ŷ_0 = 0` = unconditional mean, then it learns from each `y_t`).
+    let (fitted_w_e, _innov) = kalman::fitted_residuals(&w_e, &total_ar, &total_ma);
     let fitted_e = full_integrate_in_sample(&e, &fitted_w_e, d, big_d, mm);
     let mut fitted = vec![0.0f64; n];
     let mut residuals = vec![0.0f64; n];
@@ -456,11 +460,6 @@ fn arima_joint_exog(
         }
         fitted[i] = fitted_e[i] + adj;
         residuals[i] = y[i] - fitted[i];
-    }
-    let warmup = total_diff + recursion_order;
-    for i in 0..warmup.min(n) {
-        fitted[i] = 0.0;
-        residuals[i] = 0.0;
     }
 
     // ── 7. Information criteria. ───────────────────────────────────
@@ -690,17 +689,15 @@ fn arima_no_exog(y: &[f64], opts: ArimaOpts) -> Result<ArimaFit, ArimaError> {
         }
     };
 
-    // 7. Lift fitted / residuals back to original scale.
-    let fitted_w: Vec<f64> = (0..n_w).map(|t| w_centered[t] - eps[t] + intercept).collect();
+    // 7. Lift fitted / residuals back to original scale via the Kalman
+    //    filter's one-step-ahead predictions on the centered, fully-
+    //    differenced series. Matches R's `fitted(arima)`; the diffuse
+    //    start avoids the zero warm-up that CSS-based fitted values had.
+    let (fitted_w_centered, _innov) =
+        kalman::fitted_residuals(&w_centered, &total_ar, &total_ma);
+    let fitted_w: Vec<f64> = (0..n_w).map(|t| fitted_w_centered[t] + intercept).collect();
     let fitted = full_integrate_in_sample(y, &fitted_w, d, big_d, mm);
     let residuals: Vec<f64> = y.iter().zip(&fitted).map(|(a, b)| a - b).collect();
-    let warmup = total_diff + recursion_order;
-    let mut fitted = fitted;
-    let mut residuals = residuals;
-    for i in 0..warmup.min(n) {
-        fitted[i] = 0.0;
-        residuals[i] = 0.0;
-    }
 
     // 8. Information criteria.
     let k = pn as f64 + 1.0 + if opts.include_constant { 1.0 } else { 0.0 };

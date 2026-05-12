@@ -96,6 +96,27 @@ impl ArmaSs {
     /// `(Σ v_t²/F_t, Σ log F_t)`, both used by the concentrated
     /// likelihood.
     pub fn filter(&self, y: &[f64]) -> (f64, f64) {
+        let (sum_v2_f, sum_log_f, _, _) = self.filter_inner::<false>(y);
+        (sum_v2_f, sum_log_f)
+    }
+
+    /// Run the Kalman filter and also collect the one-step-ahead
+    /// predictions `ŷ_t = E[y_t | y_1…y_{t-1}]` and innovations
+    /// `v_t = y_t − ŷ_t`. These are what R's `fitted(arima)` returns —
+    /// the filter handles the diffuse start-up naturally so every step
+    /// has a meaningful prediction (no zero warm-up).
+    pub fn filter_with_predictions(&self, y: &[f64]) -> (Vec<f64>, Vec<f64>) {
+        let (_, _, predicted, innovations) = self.filter_inner::<true>(y);
+        (predicted, innovations)
+    }
+
+    /// Inner loop. `COLLECT = true` allocates and fills per-step
+    /// prediction/innovation buffers; `false` skips that work so the
+    /// likelihood path stays as cheap as before.
+    fn filter_inner<const COLLECT: bool>(
+        &self,
+        y: &[f64],
+    ) -> (f64, f64, Vec<f64>, Vec<f64>) {
         let r = self.r;
         let mut a = vec![0.0f64; r];
         let mut p_mat = self.lyapunov_p0();
@@ -111,12 +132,26 @@ impl ArmaSs {
         let mut work_a = vec![0.0f64; r * r];
         let mut work_b = vec![0.0f64; r * r];
 
+        let mut predicted = if COLLECT { Vec::with_capacity(y.len()) } else { Vec::new() };
+        let mut innovations = if COLLECT { Vec::with_capacity(y.len()) } else { Vec::new() };
+
         for &y_t in y {
             // Innovation v = y_t − a[0], innovation variance F = P[0,0].
             let v = y_t - a[0];
             let f = p_mat[0];
+            if COLLECT {
+                predicted.push(a[0]);
+                innovations.push(v);
+            }
             if !f.is_finite() || f <= 0.0 {
-                return (f64::INFINITY, 0.0);
+                if COLLECT {
+                    // Pad remaining slots with NaN so the buffers stay length-y.
+                    while predicted.len() < y.len() {
+                        predicted.push(f64::NAN);
+                        innovations.push(f64::NAN);
+                    }
+                }
+                return (f64::INFINITY, 0.0, predicted, innovations);
             }
             sum_v2_f += v * v / f;
             sum_log_f += f.ln();
@@ -142,7 +177,7 @@ impl ArmaSs {
                 p_mat[k] = work_b[k] + rrt[k];
             }
         }
-        (sum_v2_f, sum_log_f)
+        (sum_v2_f, sum_log_f, predicted, innovations)
     }
 }
 
@@ -170,6 +205,16 @@ pub(super) fn concentrated_sigma2(y: &[f64], phi: &[f64], theta: &[f64]) -> f64 
     let ss = ArmaSs::build(phi, theta);
     let (sum_v2_f, _) = ss.filter(y);
     sum_v2_f / y.len() as f64
+}
+
+/// One-step-ahead predictions and innovations from the Kalman filter
+/// run at (φ, θ) over `y`. Both vectors have the same length as `y`
+/// and are well-defined at every step (the filter's diffuse start-up
+/// means even `t = 0` has a meaningful prediction — the unconditional
+/// mean of the stationary process).
+pub(super) fn fitted_residuals(y: &[f64], phi: &[f64], theta: &[f64]) -> (Vec<f64>, Vec<f64>) {
+    let ss = ArmaSs::build(phi, theta);
+    ss.filter_with_predictions(y)
 }
 
 // ----------------------------------------------------------------------

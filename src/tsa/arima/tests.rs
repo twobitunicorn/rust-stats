@@ -158,6 +158,37 @@ fn recovers_ar1_truth() {
 }
 
 #[test]
+fn fitted_values_have_no_zero_warmup() {
+    // R's `fitted(arima)` returns Kalman one-step-ahead predictions
+    // at every step, with no zero warm-up at the start. Make sure
+    // we match that — for any stationary AR(1), `fitted[0]` should
+    // equal the unconditional mean of the centered series (~0 for
+    // a mean-removed AR process) but `fitted[1..p]` should reflect
+    // the filter update from earlier observations.
+    let y = simulate_arma(200, &[0.6], &[], 1.0, 0xF177ED);
+    let fit = arima(&y, ArimaOpts::new(1, 0, 0)).unwrap();
+    // Tail of fitted should be meaningful (close-ish to the data).
+    let n = y.len();
+    let mean_err: f64 =
+        (0..n).map(|i| (y[i] - fit.fitted[i]).abs()).sum::<f64>() / n as f64;
+    assert!(mean_err < 5.0, "mean |residual| = {mean_err} too large");
+    // The first fitted value is non-NaN, finite, and the second
+    // already incorporates information from y[0] (so it shouldn't
+    // be zero unless y[0] happens to be exactly zero).
+    assert!(fit.fitted[0].is_finite());
+    assert!(fit.fitted[1].is_finite());
+    // Residuals[0] should equal y[0] - fitted[0] (not zero from
+    // warm-up zeroing). For a centered AR(1), fitted[0] is the
+    // unconditional mean (close to 0), so residuals[0] ≈ y[0].
+    assert!(
+        (fit.residuals[0] - (y[0] - fit.fitted[0])).abs() < 1e-12,
+        "residuals[0] = {} but y[0] - fitted[0] = {}",
+        fit.residuals[0],
+        y[0] - fit.fitted[0],
+    );
+}
+
+#[test]
 fn recovers_ar2_truth() {
     let phi_true = [0.6, -0.2];
     let y = simulate_arma(2_000, &phi_true, &[], 1.0, 0xA2);
