@@ -2,3 +2,6 @@ target/
 Cargo.lock
 .DS_Store
 .claude/
+.venv/
+.vscode/
+__pycache__/
