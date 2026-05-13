@@ -235,23 +235,54 @@ impl ArmaSs {
                 }
                 t_vec_add(&t_col0, &da_upd, da, r);
 
-                // ∂P_{t+1} = T · ∂P_upd · Tᵀ            (O(r²) via t_x_tt)
-                //          + ∂T · P_upd · Tᵀ            (rank-1: dt_col0 ⊗ p_upd_row0_t)
-                //          + T · P_upd · ∂Tᵀ            (rank-1: t_p_upd_col0 ⊗ dt_col0)
-                //          + ∂R · Rᵀ + R · ∂Rᵀ          (rank-1 outer)
-                t_x_tt(&t_col0, &dp_upd, &mut work_b, &mut scratch_v, r);
+                // ∂P_{t+1} fused into a single nested loop. The pieces:
+                //   T · ∂P_upd · Tᵀ   (companion form, expanded inline)
+                // + ∂T · P_upd · Tᵀ   (rank-1: dt_col0 ⊗ p_upd_row0_t)
+                // + T · P_upd · ∂Tᵀ   (rank-1: t_p_upd_col0 ⊗ dt_col0)
+                // + ∂R · Rᵀ + R · ∂Rᵀ (rank-1 outer)
+                //
+                // Combining them avoids round-tripping through an r²
+                // intermediate buffer and gives the autovectoriser a
+                // single branch-free length-r SAXPY body.
+                let dp_upd_00 = dp_upd[0];
+                // scratch_v[j] = dp_upd[0, j+1] for j<r-1, else 0 (the
+                // "row-0 shifted left, trailing zero" staging vector
+                // for the companion-form T·∂P_upd·Tᵀ term).
+                scratch_v[..r - 1].copy_from_slice(&dp_upd[1..r]);
+                scratch_v[r - 1] = 0.0;
                 for i in 0..r {
+                    let phi_i = t_col0[i];
                     let dt_i = dt_col0[i];
                     let t_p_col0_i = t_p_upd_col0[i];
                     let r_i = self.r_vec[i];
                     let dr_i = dr[i];
-                    for j in 0..r {
-                        dp[i * r + j] = work_b[i * r + j]
+                    let dp_upd_col0_shift_i = if i + 1 < r {
+                        dp_upd[(i + 1) * r]
+                    } else {
+                        0.0
+                    };
+                    let beta_phi = dp_upd_col0_shift_i + dp_upd_00 * phi_i;
+                    let s_x_s_row_base = if i + 1 < r { (i + 1) * r + 1 } else { usize::MAX };
+                    for j in 0..r - 1 {
+                        let s_x_s = if s_x_s_row_base == usize::MAX {
+                            0.0
+                        } else {
+                            dp_upd[s_x_s_row_base + j]
+                        };
+                        dp[i * r + j] = s_x_s
+                            + phi_i * scratch_v[j]
+                            + beta_phi * t_col0[j]
                             + dt_i * p_upd_row0_t[j]
                             + t_p_col0_i * dt_col0[j]
                             + dr_i * self.r_vec[j]
                             + r_i * dr[j];
                     }
+                    // Last column j = r - 1: S·X·Sᵀ and scratch_v are 0.
+                    dp[i * r + r - 1] = beta_phi * t_col0[r - 1]
+                        + dt_i * p_upd_row0_t[r - 1]
+                        + t_p_col0_i * dt_col0[r - 1]
+                        + dr_i * self.r_vec[r - 1]
+                        + r_i * dr[r - 1];
                 }
             }
 
@@ -556,6 +587,7 @@ pub(super) fn concentrated_nll_and_grad(
 /// Inner loops are branch-free over `j ∈ 0..r` — `scratch` is a
 /// caller-supplied length-r work buffer (avoids the per-call Vec
 /// allocation that would otherwise dominate at small `r`).
+#[inline]
 fn t_x_tt(t_col0: &[f64], x: &[f64], out: &mut [f64], scratch: &mut [f64], r: usize) {
     let x00 = x[0];
     // row0_shift[j] = X[0, j+1] for j<r-1, else 0.
@@ -587,6 +619,7 @@ fn t_x_tt(t_col0: &[f64], x: &[f64], out: &mut [f64], scratch: &mut [f64], r: us
 
 /// Companion-form `T · v` in O(r). `(T·v)[i] = phi[i]·v[0] +
 /// v[i+1]` (with the second term zero when `i+1 ≥ r`).
+#[inline]
 fn t_vec(t_col0: &[f64], v: &[f64], out: &mut [f64], r: usize) {
     for i in 0..r {
         let shifted = if i + 1 < r { v[i + 1] } else { 0.0 };
@@ -595,6 +628,7 @@ fn t_vec(t_col0: &[f64], v: &[f64], out: &mut [f64], r: usize) {
 }
 
 /// Like `t_vec` but accumulates into `out` instead of overwriting.
+#[inline]
 fn t_vec_add(t_col0: &[f64], v: &[f64], out: &mut [f64], r: usize) {
     for i in 0..r {
         let shifted = if i + 1 < r { v[i + 1] } else { 0.0 };

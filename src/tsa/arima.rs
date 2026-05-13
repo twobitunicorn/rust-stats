@@ -1527,7 +1527,13 @@ where
 {
     let lbfgs_max = 200 + 50 * pn;
     let nm_max = 2_000 + 200 * pn;
-    let (x_lbfgs, _f_lb, lb_ok) = lbfgs::minimize_with_grad(x0, f, fg, lbfgs_max, 1e-6);
+    // Analytic gradient is exact up to the cheap finite-difference
+    // chain through `pacf → total_poly`. 1e-5 is ample parameter
+    // precision — going tighter just triggers spurious NM fall-backs
+    // when the gradient noise floor is hit, which is several ms per
+    // fit. (The CSS-ML path is particularly prone: starting from the
+    // CSS seed already near the optimum, the gradient is tiny.)
+    let (x_lbfgs, _f_lb, lb_ok) = lbfgs::minimize_with_grad(x0, f, fg, lbfgs_max, 1e-5);
     if lb_ok {
         return Ok(x_lbfgs);
     }

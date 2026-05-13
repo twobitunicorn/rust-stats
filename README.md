@@ -326,23 +326,23 @@ different (faster, slightly less efficient at finite n) estimator.
 
 | Workload | n | rust CSS | rust MLE | rust CSS-ML | R arima | statsmodels |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| ARIMA(1,0,0) | 144   | **0.06** |  0.27  |  0.30  |   1.12 |   5.06 |
-| ARIMA(1,0,0) | 720   | **0.27** |  1.03  |  1.08  |   2.22 |  14.71 |
-| ARIMA(1,0,0) | 2 880 | **0.92** |  3.98  |  4.28  |   4.84 |  44.86 |
-| ARIMA(0,0,1) | 144   | **0.09** |  0.26  |  0.28  |   1.11 |   5.45 |
-| ARIMA(0,0,1) | 720   | **0.41** |  1.13  |  1.31  |   2.50 |  17.97 |
-| ARIMA(0,0,1) | 2 880 | **1.68** |  4.50  |  5.19  |   7.76 |  56.16 |
-| ARIMA(1,0,1) | 144   | **0.19** |  0.54  |  0.64  |   1.69 |   7.95 |
-| ARIMA(1,0,1) | 720   | **0.82** |  2.23  |  2.79  |   4.11 |  22.61 |
-| ARIMA(1,0,1) | 2 880 | **3.26** |  9.19  | 10.68  |  16.23 |  76.93 |
-| ARIMA(0,1,1) | 144   | **0.09** |  0.24  |  0.27  |   0.37 |   3.70 |
-| ARIMA(0,1,1) | 720   | **0.40** |  1.07  |  1.29  |   1.06 |  10.43 |
-| ARIMA(0,1,1) | 2 880 | **1.65** |  4.31  |  4.98  |   2.25 |  27.75 |
-| ARIMA(1,1,1) | 144   | **0.21** |  0.61  |  0.68  |  13.28 |   7.42 |
-| ARIMA(1,1,1) | 720   | **0.94** |  2.34  |  3.13  |   4.47 |  17.23 |
-| ARIMA(1,1,1) | 2 880 | **3.60** |  9.74  | 11.82  |   9.53 |  57.21 |
-| SARIMA(0,1,1)(0,1,1)[12] | 144 | **1.20** |  **7.51** |  **6.93** |  16.24 | 214.37 |
-| SARIMA(0,1,1)(0,1,1)[12] | 288 | **2.41** |  **8.37** |  21.11 |  31.63 | 285.61 |
+| ARIMA(1,0,0) | 144   | **0.06** |  0.41  |  0.35  |   1.12 |   5.06 |
+| ARIMA(1,0,0) | 720   | **0.28** |  0.96  |  0.93  |   2.22 |  14.71 |
+| ARIMA(1,0,0) | 2 880 | **0.85** |  3.47  |  3.66  |   4.84 |  44.86 |
+| ARIMA(0,0,1) | 144   | **0.08** |  0.24  |  0.27  |   1.11 |   5.45 |
+| ARIMA(0,0,1) | 720   | **0.39** |  1.04  |  1.24  |   2.50 |  17.97 |
+| ARIMA(0,0,1) | 2 880 | **1.58** |  4.23  |  4.91  |   7.76 |  56.16 |
+| ARIMA(1,0,1) | 144   | **0.18** |  0.52  |  0.62  |   1.69 |   7.95 |
+| ARIMA(1,0,1) | 720   | **0.81** |  2.19  |  2.72  |   4.11 |  22.61 |
+| ARIMA(1,0,1) | 2 880 | **3.16** |  8.93  | 10.38  |  16.23 |  76.93 |
+| ARIMA(0,1,1) | 144   | **0.08** |  0.23  |  0.25  |   0.37 |   3.70 |
+| ARIMA(0,1,1) | 720   | **0.39** |  1.00  |  1.24  |   1.06 |  10.43 |
+| ARIMA(0,1,1) | 2 880 | **1.58** |  4.01  |  4.63  |   2.25 |  27.75 |
+| ARIMA(1,1,1) | 144   | **0.20** |  0.61  |  0.68  |  13.28 |   7.42 |
+| ARIMA(1,1,1) | 720   | **0.90** |  2.30  |  3.03  |   4.47 |  17.23 |
+| ARIMA(1,1,1) | 2 880 | **3.49** |  9.50  | 11.48  |   9.53 |  57.21 |
+| SARIMA(0,1,1)(0,1,1)[12] | 144 | **1.17** |  **7.12** |  **6.56** |  16.24 | 214.37 |
+| SARIMA(0,1,1)(0,1,1)[12] | 288 | **2.33** |  **7.64** |  **6.74** |  31.63 | 285.61 |
 
 (All times in ms, median of 3–50 iters.) Rust numbers include both
 the per-fit standard-error pass (Hessian + inversion of the natural-
@@ -355,9 +355,9 @@ cut the SARIMA times roughly **5×** and pulled non-seasonal MLE down
 ~30 % as well.
 
 **rust-stats CSS-ML vs R arima** (both Kalman MLE with CSS seeds):
-rust-stats is **1.5–3× faster** on non-seasonal models and **~2.3×
-faster on SARIMA** (6.9 ms vs 16.2 ms on the airline model at
-n=144). The companion-form structure-aware Kalman kernel + analytic
+rust-stats is **1.5–3× faster** on non-seasonal models and **2.5-4.7×
+faster on SARIMA** (6.6 ms vs 16.2 ms at n=144; 6.7 ms vs 31.6 ms at
+n=288). The companion-form structure-aware Kalman kernel + analytic
 gradient (with branch-free hot loops and no per-step allocation)
 beat R's Fortran reference implementation across the board.
 
