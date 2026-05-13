@@ -281,8 +281,8 @@ Single-series, large n:
 | seasonal_decompose     | n=2 880              | **0.02** |  0.22 |  1.19 |
 | ARIMA(1,1,1) MLE       | n=2 880              | **12.1** | 57.2 | – |
 | SARIMA airline MLE     | n=288, m=12          | **125.7** | 285.6 | – |
-| catch24                | n=5 000              | **0.5** | 28.1 (pycatch22) | – |
-| catch24                | n=100 000            | **9.5** | 2 967 (pycatch22) | – |
+| catch24                | n=5 000              | **0.6** | 27.4 (pycatch22) ≈ 26.6 (canonical C) | – |
+| catch24                | n=100 000            | **10.5** | 3 035 (pycatch22) ≈ 3 007 (canonical C) | – |
 
 Batched, 50 series at a time:
 
@@ -314,23 +314,34 @@ Full tables below.
 | seasonal_decompose (×)    | n=720,  period=12  | 0.005 ms | 0.129 ms |    0.678 ms |
 | seasonal_decompose (×)    | n=2 880, period=24 | 0.024 ms | 0.227 ms |    1.108 ms |
 
-### catch22 / catch24 vs pycatch22
+### catch22 / catch24 vs pycatch22 vs canonical C
 
 `rust_stats::catch22::catch24(&y)` (22 catch22 features + `DN_Mean` +
 `DN_Spread_Std`) versus
 [`pycatch22.catch22_all(y, catch24=True)`](https://github.com/DynamicsAndNeuralSystems/pycatch22)
-on Gaussian inputs (single process, median of warmed runs; reproduce with
-`cargo run --release --example bench_catch22` and
-`python3 tests/golden/bench_catch22_pycatch22.py`):
+versus the upstream
+[catch22 C kernel](https://github.com/DynamicsAndNeuralSystems/catch22)
+built locally with `gcc -O3`. Same Gaussian inputs in all three columns
+(xorshift64 + Box–Muller, identical seeds). Reproduce with
+`cargo run --release --example bench_catch22`,
+`python3 tests/golden/bench_catch22_pycatch22.py`, and the harness in
+[`benchmarks/catch22_c/`](benchmarks/catch22_c/).
 
-| n        | rust-stats | pycatch22 |    speedup |
-| ---:     |       ---: |      ---: |       ---: |
-| 200      |   0.111 ms |  0.429 ms |       3.9× |
-| 1 000    |   0.134 ms |  2.465 ms |      18.4× |
-| 5 000    |   0.523 ms | 28.060 ms |      53.7× |
-| 20 000   |   1.822 ms |  204.1 ms |     112.0× |
-| 50 000   |   3.701 ms |  866.1 ms |     234.0× |
-| 100 000  |   9.525 ms |  2 967 ms |     311.5× |
+| n        | rust-stats | canonical C | pycatch22 | rust speedup vs C |
+| ---:     |       ---: |        ---: |      ---: |              ---: |
+| 200      |   0.075 ms |    0.466 ms |  0.449 ms |              6.2× |
+| 1 000    |   0.139 ms |    2.311 ms |  2.524 ms |             16.6× |
+| 5 000    |   0.629 ms |   26.571 ms | 27.411 ms |             42.2× |
+| 20 000   |   2.050 ms |  202.577 ms |  205.4 ms |             98.8× |
+| 50 000   |   6.670 ms |  860.885 ms |  879.9 ms |            129.1× |
+| 100 000  |  10.520 ms | 3 006.954 ms | 3 035 ms |            285.8× |
+
+`pycatch22` and the bare C kernel agree to within noise — the Python
+wrapper's overhead is negligible, so the speedup is genuine
+kernel-vs-kernel, not a Python-overhead artifact. The C reference scales
+superlinearly at large n (≈3.5× slower for 2× data at n=100k vs 50k);
+ours stays close to linear (≈1.6× for the same step), which is why the
+gap widens with n.
 
 The 22 features fan out across `rayon` workers; one FFT-based
 autocorrelation pass is shared by 5 of them; a single

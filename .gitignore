@@ -5,3 +5,4 @@ Cargo.lock
 .venv/
 .vscode/
 __pycache__/
+.reference/
