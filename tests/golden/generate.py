@@ -126,10 +126,40 @@ def loess_goldens():
     _loess_fit("noisy_span50",  noisy,  0.50)
 
 
+def _catch22_fit(name, y, *, catch24=True):
+    import pycatch22  # noqa: imported lazily so STL/LOESS goldens still work without it
+    ref = pycatch22.catch22_all(list(map(float, y)), catch24=bool(catch24))
+    out = {
+        "y": list(map(float, y)),
+        "names": list(ref["names"]),
+        "values": list(map(float, ref["values"])),
+    }
+    target = OUT_DIR / f"catch22_{name}.json"
+    with target.open("w") as f:
+        json.dump(out, f, indent=2)
+    print(f"wrote {target}")
+
+
+def catch22_goldens():
+    # Same seeds and sample sizes as the polars-timeseries Python tests,
+    # so the rust-stats integration test exercises the canonical
+    # pycatch22 surface on inputs known to compare cleanly.
+    for seed in (0, 1, 7, 42, 1234):
+        rng = np.random.default_rng(seed)
+        _catch22_fit(f"normal_n200_seed{seed}", rng.standard_normal(200))
+    # Only random-normal goldens are kept. Periodic series (sine etc.)
+    # were considered but produce integer-quantised features
+    # (e.g. SB_BinaryStats_*_longstretch*) that sit on a threshold —
+    # a sub-ULP difference between the rust-stats standalone build and
+    # an LTO'd downstream build can shift the count by ±1. The random
+    # goldens exercise every feature code path without this brittleness.
+
+
 def main():
     seasonal_decompose_goldens()
     stl_goldens()
     loess_goldens()
+    catch22_goldens()
 
 
 if __name__ == "__main__":

@@ -104,6 +104,13 @@ batched variants (`stl_batch`, `loess_batch`, `seasonal_decompose_batch`)
 - **Transforms** — `center`, `z_score`, `min_max_scale`, `box_cox`;
   the three reductions go through a `pulp` runtime-dispatched SIMD
   kernel on stable Rust.
+- **catch22 / catch24** — the 22-feature canonical time-series feature
+  set of Lubba et al. 2019 (`catch22`), plus the two `catch24` extras
+  (`DN_Mean`, `DN_Spread_Std`). Verified bit-for-bit against
+  [pycatch22](https://github.com/DynamicsAndNeuralSystems/pycatch22)
+  (the canonical C implementation) at `~1e-6` relative tolerance.
+  One FFT-based autocorrelation pass is shared across five features;
+  the 22-way fan-out is parallelised with rayon.
 - **Apache Arrow interop** (optional, `arrow` feature) — thin adapters so
   the same routines accept `Float64Array` / `RecordBatch` and return
   Arrow outputs.
@@ -267,13 +274,15 @@ so we're comparing per-point fits in both directions.
 
 Single-series, large n:
 
-| Operation | size | rust-stats | statsmodels | R 4.6 |
+| Operation | size | rust-stats | statsmodels / pycatch22 | R 4.6 |
 | --- | --- | ---: | ---: | ---: |
 | LOESS                  | n=5 000              | **7.9** | 79.6 | 40.1 |
 | STL                    | n=2 880, period=24   | **1.7** | 11.7 |  2.4 |
 | seasonal_decompose     | n=2 880              | **0.02** |  0.22 |  1.19 |
 | ARIMA(1,1,1) MLE       | n=2 880              | **12.1** | 57.2 | – |
 | SARIMA airline MLE     | n=288, m=12          | **125.7** | 285.6 | – |
+| catch24                | n=5 000              | **0.5** | 28.1 (pycatch22) | – |
+| catch24                | n=100 000            | **9.5** | 2 967 (pycatch22) | – |
 
 Batched, 50 series at a time:
 
@@ -304,6 +313,32 @@ Full tables below.
 | seasonal_decompose (×)    | n=144,  period=12  | 0.001 ms | 0.120 ms |    0.562 ms |
 | seasonal_decompose (×)    | n=720,  period=12  | 0.005 ms | 0.129 ms |    0.678 ms |
 | seasonal_decompose (×)    | n=2 880, period=24 | 0.024 ms | 0.227 ms |    1.108 ms |
+
+### catch22 / catch24 vs pycatch22
+
+`rust_stats::catch22::catch24(&y)` (22 catch22 features + `DN_Mean` +
+`DN_Spread_Std`) versus
+[`pycatch22.catch22_all(y, catch24=True)`](https://github.com/DynamicsAndNeuralSystems/pycatch22)
+on Gaussian inputs (single process, median of warmed runs; reproduce with
+`cargo run --release --example bench_catch22` and
+`python3 tests/golden/bench_catch22_pycatch22.py`):
+
+| n        | rust-stats | pycatch22 |    speedup |
+| ---:     |       ---: |      ---: |       ---: |
+| 200      |   0.111 ms |  0.429 ms |       3.9× |
+| 1 000    |   0.134 ms |  2.465 ms |      18.4× |
+| 5 000    |   0.523 ms | 28.060 ms |      53.7× |
+| 20 000   |   1.822 ms |  204.1 ms |     112.0× |
+| 50 000   |   3.701 ms |  866.1 ms |     234.0× |
+| 100 000  |   9.525 ms |  2 967 ms |     311.5× |
+
+The 22 features fan out across `rayon` workers; one FFT-based
+autocorrelation pass is shared by 5 of them; a single
+[order-statistic Fenwick tree](src/catch22/features.rs)
+replaces the O(n_thresh × N) outlier-threshold scan in
+`DN_OutlierInclude` with O((N + n_thresh) log N). At n=20 000 this
+matches the polars-timeseries plugin benchmark (~113× over pycatch22)
+since polars-timeseries delegates to this crate.
 
 ### ARIMA / SARIMA
 

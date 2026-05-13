@@ -3,7 +3,7 @@ name = "rust-stats"
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-description = "Pure-Rust statistical modeling: LOESS, STL, seasonal_decompose"
+description = "Pure-Rust statistical modeling: LOESS, STL, seasonal_decompose, ARIMA, Holt-Winters, catch22"
 
 [dependencies]
 thiserror = "2"
@@ -11,9 +11,11 @@ rayon = "1.10"
 # Backs the SIMD kernels in `transforms` and `smoothing::loess_batch`.
 # Stable Rust; runtime ISA dispatch (SSE2 / AVX2 / AVX-512 on x86_64,
 # NEON on aarch64; scalar fallback elsewhere).
-pulp   = "0.22"
-arrow  = { version = "58", optional = true, default-features = false }
-polars = { version = "0.53", optional = true, default-features = false }
+pulp    = "0.22"
+# FFT-based autocorrelation and Welch PSD, used by `catch22`.
+realfft = "3.4"
+arrow   = { version = "58", optional = true, default-features = false }
+polars  = { version = "0.53", optional = true, default-features = false }
 
 [features]
 default = []

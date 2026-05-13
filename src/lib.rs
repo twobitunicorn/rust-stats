@@ -3,6 +3,7 @@
 //! Smoothing and seasonal-trend decomposition: LOESS, Cleveland 1990 STL,
 //! and classical seasonal_decompose.
 
+pub mod catch22;
 pub mod error;
 pub mod smoothing;
 pub mod transforms;
