@@ -643,13 +643,23 @@ pub fn pd_periodicity_wang_th0_01(y_sub: Option<&[f64]>) -> f64 {
 
 /// Unnormalized linear autocovariance via FFT: r[lag] = sum y[i]*y[i+lag] for
 /// lag in 0..n. Assumes y already has zero mean (or that the caller doesn't care).
+///
+/// `realfft` doesn't scale on inverse (forward + inverse = m * identity), so we
+/// divide by the zero-padded FFT length here to land on the same numerator the
+/// canonical catch22 C kernel computes by direct summation. Without this, the
+/// absolute threshold check inside `pd_periodicity_wang_th0_01` (peak − trough
+/// ≥ 0.01) is bypassed by FFT-scaled noise peaks at small lags.
 fn autocov_unnormalized_fft(y: &[f64]) -> Vec<f64> {
     let n = y.len();
     if n < 2 {
         return vec![0.0; n.max(1)];
     }
+    let m = (2 * n).next_power_of_two().max(2);
     match fft_squared_magnitude_inverse(y, 0.0) {
-        Some(out) => out[..n].to_vec(),
+        Some(out) => {
+            let scale = 1.0 / m as f64;
+            out[..n].iter().map(|&v| v * scale).collect()
+        }
         None => vec![0.0; n],
     }
 }
@@ -801,7 +811,12 @@ fn sc_fluctanal_logi_prop(x: &[f64], lag: usize, mode: FluctMode) -> f64 {
     if size < 4 || x.iter().any(|v| v.is_nan()) {
         return f64::NAN;
     }
-    let half_log = (size as f64 / 2.0).ln();
+    // Use C integer division (size / 2) — not real division — to match the
+    // canonical kernel exactly. With real division, the upper end of the
+    // tau schedule rounds *up* one unit (e.g. n=5001 → tau[49] = 2501),
+    // which gives n_buffer = 0 → F = NaN → NaN poisons every sserr slot
+    // → first_min_ind sticks at 0 → wildly wrong result.
+    let half_log = ((size / 2) as f64).ln();
     let low_log = 5.0_f64.ln();
     if !half_log.is_finite() || half_log <= low_log {
         return 0.0;
