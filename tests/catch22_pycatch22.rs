@@ -6,7 +6,9 @@
 //! the input series, pycatch22's feature names, and pycatch22's values.
 //! We compute the catch24 panel here and compare per-feature.
 
-use rust_stats::catch22::{catch24, CATCH22_NAMES, CATCH24_EXTRA_NAMES};
+use rust_stats::catch22::{
+    catch24, CATCH22_NAMES, CATCH22_SHORT_NAMES, CATCH24_EXTRA_NAMES, CATCH24_EXTRA_SHORT_NAMES,
+};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -15,7 +17,18 @@ use std::path::PathBuf;
 struct Golden {
     y: Vec<f64>,
     names: Vec<String>,
-    values: Vec<f64>,
+    /// pycatch22 may return NaN for features that don't apply to a given
+    /// input (e.g. constant series). The generator maps NaN/±inf to JSON
+    /// null; we decode those back to f64::NAN here.
+    values: Vec<Option<f64>>,
+    #[serde(default)]
+    short_names: Option<Vec<String>>,
+}
+
+impl Golden {
+    fn value_at(&self, i: usize) -> f64 {
+        self.values[i].unwrap_or(f64::NAN)
+    }
 }
 
 fn load(name: &str) -> Golden {
@@ -28,13 +41,25 @@ fn load(name: &str) -> Golden {
     serde_json::from_slice(&bytes).expect("invalid golden JSON")
 }
 
+/// NaN-aware closeness: NaN matches NaN, ±∞ must match exactly,
+/// otherwise compare with mixed abs/rel tolerance.
+fn close(ours: f64, theirs: f64, rel_tol: f64, abs_tol: f64) -> bool {
+    if ours.is_nan() && theirs.is_nan() {
+        return true;
+    }
+    if ours.is_infinite() || theirs.is_infinite() {
+        return ours == theirs;
+    }
+    (ours - theirs).abs() <= abs_tol.max(rel_tol * ours.abs().max(theirs.abs()))
+}
+
 fn assert_matches_pycatch22(name: &str, rel_tol: f64, abs_tol: f64) {
     let g = load(name);
     let ref_values: HashMap<&str, f64> = g
         .names
         .iter()
-        .map(|s| s.as_str())
-        .zip(g.values.iter().copied())
+        .enumerate()
+        .map(|(i, s)| (s.as_str(), g.value_at(i)))
         .collect();
 
     let ours = catch24(&g.y);
@@ -51,9 +76,7 @@ fn assert_matches_pycatch22(name: &str, rel_tol: f64, abs_tol: f64) {
             .copied()
             .unwrap_or_else(|| panic!("missing reference value for {feature_name} in {name}"));
 
-        let close = (ours_v - ref_v).abs()
-            <= abs_tol.max(rel_tol * ours_v.abs().max(ref_v.abs()));
-        if !close {
+        if !close(ours_v, ref_v, rel_tol, abs_tol) {
             failures.push(format!(
                 "{feature_name}: ours={ours_v}, pycatch22={ref_v}, |Δ|={}",
                 (ours_v - ref_v).abs()
@@ -68,6 +91,8 @@ fn assert_matches_pycatch22(name: &str, rel_tol: f64, abs_tol: f64) {
         failures.join("\n  ")
     );
 }
+
+// --- Random-normal n=200 panel -------------------------------------------------
 
 #[test]
 fn matches_pycatch22_normal_seed0() {
@@ -94,3 +119,81 @@ fn matches_pycatch22_normal_seed1234() {
     assert_matches_pycatch22("normal_n200_seed1234", 1e-6, 1e-9);
 }
 
+// --- Edge cases ----------------------------------------------------------------
+
+/// Constant input (std == 0). pycatch22 returns NaN for 19 of the 22
+/// catch22 features and finite zeros for the remaining three plus the
+/// catch24 extras (DN_Mean=3.0, DN_Spread_Std=0.0). Verifies our NaN
+/// fallbacks line up with the reference, not just the finite values.
+#[test]
+fn matches_pycatch22_constant_input() {
+    assert_matches_pycatch22("constant_n200", 1e-6, 1e-9);
+}
+
+/// Near-constant input — std ≈ 1e-12. Stresses the z-score normalisation
+/// path, where dividing by a tiny std could amplify roundoff differently
+/// between our FFT and pycatch22's.
+#[test]
+fn matches_pycatch22_near_constant_input() {
+    // Looser rel tol: when std is sub-ULP, the z-score amplifies any
+    // implementation difference, but the features should still agree to
+    // ~1e-3 if the kernels are fundamentally sound.
+    assert_matches_pycatch22("near_constant_n200_seed0", 1e-3, 1e-6);
+}
+
+/// Short series, n=20. Several features have hard-coded lag schedules
+/// that bump up against the series length here.
+#[test]
+fn matches_pycatch22_short_n20() {
+    assert_matches_pycatch22("normal_n20_seed0", 1e-6, 1e-9);
+}
+
+/// Short series, n=50.
+#[test]
+fn matches_pycatch22_short_n50() {
+    assert_matches_pycatch22("normal_n50_seed0", 1e-6, 1e-9);
+}
+
+/// Larger n = 10_000 — confirms the FFT / DFA paths don't drift from
+/// pycatch22 at sizes well outside the n=200 panel. Slightly looser tol
+/// to absorb FFT-library accumulation differences over longer series.
+#[test]
+fn matches_pycatch22_large_n10000() {
+    assert_matches_pycatch22("normal_n10000_seed0", 1e-5, 1e-8);
+}
+
+// --- Short-name round-trip -----------------------------------------------------
+
+/// CATCH22_SHORT_NAMES (and the catch24 extras' short names) must match
+/// pycatch22's `short_names=True` output index-for-index. pycatch22's
+/// mapping has known oddities (e.g. `centroid_freq` and `low_freq_power`
+/// swapped relative to the long names) — this pins ours against the
+/// canonical source so we can't drift away later.
+#[test]
+fn short_names_match_pycatch22() {
+    let g = load("normal_n200_seed0_shortnames");
+    let ref_short = g
+        .short_names
+        .as_ref()
+        .expect("shortnames golden missing short_names field");
+    assert_eq!(ref_short.len(), 24, "expected 22+2 short names");
+
+    let ours: Vec<&str> = CATCH22_SHORT_NAMES
+        .iter()
+        .chain(CATCH24_EXTRA_SHORT_NAMES.iter())
+        .copied()
+        .collect();
+
+    let mismatches: Vec<String> = ours
+        .iter()
+        .zip(ref_short.iter())
+        .enumerate()
+        .filter(|(_, (a, b))| **a != b.as_str())
+        .map(|(i, (a, b))| format!("[{i}] ours={a:?} pycatch22={b:?}"))
+        .collect();
+    assert!(
+        mismatches.is_empty(),
+        "short-name disagreement vs pycatch22:\n  {}",
+        mismatches.join("\n  ")
+    );
+}

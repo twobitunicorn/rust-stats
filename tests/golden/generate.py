@@ -126,14 +126,28 @@ def loess_goldens():
     _loess_fit("noisy_span50",  noisy,  0.50)
 
 
-def _catch22_fit(name, y, *, catch24=True):
+def _catch22_fit(name, y, *, catch24=True, short_names=False):
     import pycatch22  # noqa: imported lazily so STL/LOESS goldens still work without it
-    ref = pycatch22.catch22_all(list(map(float, y)), catch24=bool(catch24))
+    ref = pycatch22.catch22_all(
+        list(map(float, y)),
+        catch24=bool(catch24),
+        short_names=bool(short_names),
+    )
+    # Map NaN / ±inf to JSON null so the file stays valid JSON
+    # (serde_json rejects Python's non-standard NaN/Infinity literals).
+    # The Rust side decodes None back to NaN.
+    def jsonable(v):
+        v = float(v)
+        if v != v or v in (float("inf"), float("-inf")):
+            return None
+        return v
     out = {
         "y": list(map(float, y)),
         "names": list(ref["names"]),
-        "values": list(map(float, ref["values"])),
+        "values": [jsonable(v) for v in ref["values"]],
     }
+    if short_names:
+        out["short_names"] = list(ref["short_names"])
     target = OUT_DIR / f"catch22_{name}.json"
     with target.open("w") as f:
         json.dump(out, f, indent=2)
@@ -147,12 +161,32 @@ def catch22_goldens():
     for seed in (0, 1, 7, 42, 1234):
         rng = np.random.default_rng(seed)
         _catch22_fit(f"normal_n200_seed{seed}", rng.standard_normal(200))
-    # Only random-normal goldens are kept. Periodic series (sine etc.)
-    # were considered but produce integer-quantised features
-    # (e.g. SB_BinaryStats_*_longstretch*) that sit on a threshold —
-    # a sub-ULP difference between the rust-stats standalone build and
-    # an LTO'd downstream build can shift the count by ±1. The random
-    # goldens exercise every feature code path without this brittleness.
+
+    # Edge-case goldens beyond the n=200 random-normal panel.
+    # Pin the behavior pycatch22 produces on these so a future numeric
+    # change in our kernels can't drift silently.
+    _catch22_fit("constant_n200", np.full(200, 3.0))                          # std == 0 fallback
+    rng = np.random.default_rng(0)
+    near = 3.0 + 1e-12 * rng.standard_normal(200)
+    _catch22_fit("near_constant_n200_seed0", near)                            # tiny-std stress
+    _catch22_fit("normal_n20_seed0",   np.random.default_rng(0).standard_normal(20))   # short
+    _catch22_fit("normal_n50_seed0",   np.random.default_rng(0).standard_normal(50))   # short
+    _catch22_fit("normal_n10000_seed0", np.random.default_rng(0).standard_normal(10000))  # large
+
+    # Round-trip pycatch22's short_names=True output so we can verify
+    # CATCH22_SHORT_NAMES line up index-for-index with the canonical mapping.
+    _catch22_fit(
+        "normal_n200_seed0_shortnames",
+        np.random.default_rng(0).standard_normal(200),
+        short_names=True,
+    )
+
+    # Periodic series (sine etc.) are intentionally NOT included — they
+    # produce integer-quantised features (SB_BinaryStats_*_longstretch*,
+    # SB_TransitionMatrix_*) that sit on a threshold. A sub-ULP shift
+    # between the rust-stats standalone build and an LTO'd downstream
+    # build can change the count by ±1. The random-normal goldens
+    # exercise every feature code path without this brittleness.
 
 
 def main():

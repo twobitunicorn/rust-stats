@@ -8,14 +8,19 @@
 //! to ~`1e-6` relative tolerance on multiple seeded inputs.
 //!
 //! ```ignore
-//! use rust_stats::catch22::{catch22, catch24, CATCH22_NAMES};
+//! use rust_stats::catch22::catch22_named;
 //!
 //! let y: Vec<f64> = (0..200).map(|i| (i as f64).sin()).collect();
-//! let values: [f64; 22] = catch22(&y);
-//! for (name, v) in CATCH22_NAMES.iter().zip(values) {
+//! for (name, v) in catch22_named(&y) {
 //!     println!("{name} = {v}");
 //! }
 //! ```
+//!
+//! ## Input requirements
+//!
+//! Inputs must be finite. NaN or ±∞ entries are not silently filtered;
+//! they propagate through the kernels and corrupt every feature. Strip
+//! them upstream. In debug builds this is checked with `debug_assert!`.
 //!
 //! ## Algorithm shape
 //!
@@ -106,9 +111,16 @@ pub const CATCH24_EXTRA_SHORT_NAMES: [&str; 2] = ["mean", "SD"];
 /// Returns the values in the order given by [`CATCH22_NAMES`]. The
 /// input is z-scored internally (sample std, ddof = 1) before feature
 /// computation; constant inputs are handled via the same fallbacks as
-/// the reference C implementation. Non-finite entries in `y` are
-/// assumed to have been stripped upstream.
+/// the reference C implementation.
+///
+/// `y` must contain only finite values. NaN or ±∞ entries propagate
+/// through the kernels and corrupt every feature; strip them upstream.
+/// In debug builds this is checked with `debug_assert!`.
 pub fn catch22(y: &[f64]) -> [f64; 22] {
+    debug_assert!(
+        y.iter().all(|v| v.is_finite()),
+        "catch22: input contains non-finite values; strip them upstream"
+    );
     let (raw_mean, raw_std) = (features::dn_mean(y), features::dn_spread_std(y));
     compute(y, raw_mean, raw_std)
 }
@@ -119,8 +131,12 @@ pub fn catch22(y: &[f64]) -> [f64; 22] {
 /// Returns the values in the order given by [`CATCH22_NAMES`] followed
 /// by [`CATCH24_EXTRA_NAMES`]. The extras are computed on the **raw**
 /// (non-z-scored) series — this matches `pycatch22.catch22_all(..,
-/// catch24=True)`.
+/// catch24=True)`. See [`catch22`] for input requirements.
 pub fn catch24(y: &[f64]) -> [f64; 24] {
+    debug_assert!(
+        y.iter().all(|v| v.is_finite()),
+        "catch24: input contains non-finite values; strip them upstream"
+    );
     let raw_mean = features::dn_mean(y);
     let raw_std = features::dn_spread_std(y);
     let core = compute(y, raw_mean, raw_std);
@@ -131,16 +147,48 @@ pub fn catch24(y: &[f64]) -> [f64; 24] {
     out
 }
 
+/// Convenience wrapper around [`catch22`] that pairs each value with its
+/// canonical long name. Order matches [`CATCH22_NAMES`].
+pub fn catch22_named(y: &[f64]) -> [(&'static str, f64); 22] {
+    let values = catch22(y);
+    let mut out: [(&'static str, f64); 22] = [("", 0.0); 22];
+    for i in 0..22 {
+        out[i] = (CATCH22_NAMES[i], values[i]);
+    }
+    out
+}
+
+/// Convenience wrapper around [`catch24`] that pairs each value with its
+/// canonical long name. Order matches [`CATCH22_NAMES`] followed by
+/// [`CATCH24_EXTRA_NAMES`].
+pub fn catch24_named(y: &[f64]) -> [(&'static str, f64); 24] {
+    let values = catch24(y);
+    let mut out: [(&'static str, f64); 24] = [("", 0.0); 24];
+    for i in 0..22 {
+        out[i] = (CATCH22_NAMES[i], values[i]);
+    }
+    out[22] = (CATCH24_EXTRA_NAMES[0], values[22]);
+    out[23] = (CATCH24_EXTRA_NAMES[1], values[23]);
+    out
+}
+
 fn compute(raw: &[f64], raw_mean: f64, raw_std: f64) -> [f64; 22] {
-    // catch22 z-scores its input internally (sample std, ddof = 1) before
-    // running any per-feature kernel. Constant inputs (std == 0) fall
-    // back to the raw series; per-feature constant-input handling kicks
-    // in from there.
-    let data: Vec<f64> = if raw_std.is_finite() && raw_std > 0.0 {
-        raw.iter().map(|v| (v - raw_mean) / raw_std).collect()
-    } else {
-        raw.to_vec()
-    };
+    // Constant input (std == 0) carries no information. pycatch22's
+    // contract here is NaN for 19 of the 22 features; the three lag-
+    // based ones (CO_f1ecac, CO_FirstMin_ac, PD_PeriodicityWang_th0_01)
+    // canonicalise to 0. Match that exactly rather than running the
+    // kernels on a degenerate series — the C kernels short-circuit
+    // similarly, but doing it here avoids 22 redundant std checks.
+    if !raw_std.is_finite() || raw_std == 0.0 {
+        let mut out = [f64::NAN; 22];
+        out[2] = 0.0; // CO_f1ecac
+        out[3] = 0.0; // CO_FirstMin_ac
+        out[9] = 0.0; // PD_PeriodicityWang_th0_01
+        return out;
+    }
+    // catch22 z-scores its input internally (sample std, ddof = 1)
+    // before running any per-feature kernel.
+    let data: Vec<f64> = raw.iter().map(|v| (v - raw_mean) / raw_std).collect();
 
     // Shared state: one FFT-based ACF pass, reused by 5 features.
     let acf = features::autocorr_fft(&data);
@@ -264,5 +312,54 @@ mod tests {
         assert_eq!(CATCH22_SHORT_NAMES.len(), 22);
         assert_eq!(CATCH24_EXTRA_NAMES.len(), 2);
         assert_eq!(CATCH24_EXTRA_SHORT_NAMES.len(), 2);
+    }
+
+    #[test]
+    fn catch22_named_returns_canonical_long_names() {
+        let x: Vec<f64> = (1..=20).map(|i| i as f64).collect();
+        let named = catch22_named(&x);
+        let raw = catch22(&x);
+        for (i, (name, value)) in named.iter().enumerate() {
+            assert_eq!(*name, CATCH22_NAMES[i]);
+            assert_eq!(*value, raw[i]);
+        }
+    }
+
+    #[test]
+    fn catch24_named_includes_dn_extras() {
+        let x: Vec<f64> = (1..=20).map(|i| i as f64).collect();
+        let named = catch24_named(&x);
+        assert_eq!(named[22].0, "DN_Mean");
+        assert_eq!(named[23].0, "DN_Spread_Std");
+        assert_relative_eq!(named[22].1, features::dn_mean(&x), max_relative = 1e-12);
+        assert_relative_eq!(named[23].1, features::dn_spread_std(&x), max_relative = 1e-12);
+    }
+
+    /// In release builds (debug_assert disabled) NaN inputs propagate
+    /// silently — that's the documented behavior. Pin it so the policy
+    /// can't change without an explicit code review.
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn nan_inputs_propagate_in_release() {
+        let mut x: Vec<f64> = (1..=50).map(|i| i as f64).collect();
+        x[10] = f64::NAN;
+        let out = catch22(&x);
+        assert!(
+            out.iter().any(|v| v.is_nan()),
+            "expected NaN to leak into the catch22 panel; instead got {:?}",
+            out
+        );
+    }
+
+    /// In debug builds the contract is enforced via debug_assert, so a
+    /// NaN-containing input panics rather than silently producing
+    /// garbage. Pin that too.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "non-finite")]
+    fn nan_inputs_panic_in_debug() {
+        let mut x: Vec<f64> = (1..=50).map(|i| i as f64).collect();
+        x[10] = f64::NAN;
+        let _ = catch22(&x);
     }
 }
